@@ -33,6 +33,9 @@ struct Credentials {
     access_token: Option<String>,
     /// Unix seconds at which the access token expires (with a safety margin).
     expires_at: Option<u64>,
+    /// Raw `Cookie:` header copied from a logged-in browser, used for the
+    /// website-only library-listing endpoint (which ignores OAuth).
+    session_cookie: Option<String>,
 }
 
 fn now_unix() -> u64 {
@@ -82,6 +85,16 @@ impl TokenStore {
 
     pub fn client_secret() -> Result<Option<String>> {
         Ok(Self::load()?.client_secret)
+    }
+
+    pub fn save_session_cookie(cookie: &str) -> Result<()> {
+        let mut creds = Self::load()?;
+        creds.session_cookie = Some(cookie.to_string());
+        Self::save(&creds)
+    }
+
+    pub fn session_cookie() -> Result<Option<String>> {
+        Ok(Self::load()?.session_cookie)
     }
 
     /// Forget session tokens (keeps the client secret — that's config).

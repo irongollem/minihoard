@@ -17,6 +17,7 @@ pub mod auth;
 pub mod config;
 pub mod download;
 pub mod error;
+pub mod library;
 pub mod unpack;
 
 pub use config::Config;

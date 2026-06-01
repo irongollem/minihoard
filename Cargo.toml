@@ -19,7 +19,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 futures-util = "0.3"
 # TLS-impersonating client for the Cloudflare-fronted download host
-wreq = "6.0.0-rc"
+wreq = { version = "6.0.0-rc", features = ["gzip", "brotli", "zstd", "deflate"] }
 wreq-util = "3.0.0-rc"
 
 # serde + config

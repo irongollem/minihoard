@@ -26,6 +26,9 @@ enum Command {
     Logout,
     /// Print the authenticated MMF account (proves login works).
     Whoami,
+    /// Store the MMF website session cookie (paste the Cookie header from a
+    /// logged-in browser) — needed for full-library listing.
+    SetCookie,
     /// Probe authenticated endpoints to discover your library (M0 spike).
     Explore {
         /// Optional object id you OWN, to confirm files + download_url appear.
@@ -64,6 +67,7 @@ async fn main() -> Result<()> {
         Command::Login => login().await,
         Command::Logout => logout(),
         Command::Whoami => whoami().await,
+        Command::SetCookie => set_cookie(),
         Command::Explore { object } => explore(object).await,
         Command::List => list().await,
         Command::Download { ids } => download(ids).await,
@@ -141,6 +145,30 @@ async fn login() -> Result<()> {
 fn logout() -> Result<()> {
     mmf_core::auth::TokenStore::clear()?;
     println!("Cleared stored credentials.");
+    Ok(())
+}
+
+/// Store the website session cookie (pasted from a logged-in browser).
+fn set_cookie() -> Result<()> {
+    println!(
+        "Paste your MyMiniFactory Cookie header, then Enter.\n\
+         (In the browser DevTools: Network tab → any www.myminifactory.com request →\n\
+          Request Headers → copy the full `cookie:` value.)\n"
+    );
+    print!("cookie: ");
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let mut cookie = input.trim();
+    // Tolerate pasting the whole header line ("cookie: ...").
+    if let Some(rest) = cookie.strip_prefix("cookie:").or_else(|| cookie.strip_prefix("Cookie:")) {
+        cookie = rest.trim();
+    }
+    if cookie.is_empty() {
+        anyhow::bail!("no cookie entered");
+    }
+    mmf_core::auth::TokenStore::save_session_cookie(cookie)?;
+    println!("Saved session cookie to the keychain.");
     Ok(())
 }
 
@@ -247,8 +275,53 @@ fn preview(v: &serde_json::Value) -> String {
 }
 
 async fn list() -> Result<()> {
+    use std::collections::BTreeMap;
+
     let _config = Config::load()?;
-    anyhow::bail!("`list` arrives in milestone M4");
+    let cookie = mmf_core::auth::TokenStore::session_cookie()?
+        .ok_or_else(|| anyhow::anyhow!("no session cookie — run `minihoard set-cookie` first"))?;
+
+    let raw = mmf_core::library::fetch_library(&cookie)
+        .await
+        .context("fetch library (objectPreviews)")?;
+    let total_raw = raw.len();
+    let mut entries = mmf_core::library::dedupe(raw);
+    println!("Library: {} unique objects ({total_raw} raw entries)\n", entries.len());
+
+    // Per-month counts (newest first).
+    let mut by_month: BTreeMap<String, usize> = BTreeMap::new();
+    for e in &entries {
+        *by_month
+            .entry(e.yearmonth().unwrap_or_else(|| "unknown".into()))
+            .or_default() += 1;
+    }
+    println!("By release month:");
+    for (ym, n) in by_month.iter().rev().take(18) {
+        let label = if ym.len() == 6 {
+            format!("{}-{}", &ym[4..6], &ym[0..4])
+        } else {
+            ym.clone()
+        };
+        println!("  {label:>9}  {n:>4}");
+    }
+
+    // Newest 25 by libraryAddedAt.
+    entries.sort_by(|a, b| b.library_added_at.cmp(&a.library_added_at));
+    println!("\nMost recently added:");
+    for e in entries.iter().take(25) {
+        let added = e
+            .library_added_at
+            .as_deref()
+            .map(|s| s.split('T').next().unwrap_or(s))
+            .unwrap_or("?");
+        let creator = e.creator_name.as_deref().unwrap_or("?");
+        let month = e.month_label().unwrap_or_default();
+        println!(
+            "  {added}  {:>8}  [{month:>7}]  {}  — {}",
+            e.original_id, e.name, creator
+        );
+    }
+    Ok(())
 }
 
 async fn download(ids: Vec<u64>) -> Result<()> {
