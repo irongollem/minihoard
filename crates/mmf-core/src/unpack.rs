@@ -22,7 +22,13 @@ pub fn unpack_zip(archive: &Path, dest_root: &Path) -> Result<UnpackReport> {
         .and_then(|s| s.to_str())
         .ok_or_else(|| Error::Unpack(format!("bad archive name: {}", archive.display())))?;
     let dest = dest_root.join(stem);
-    std::fs::create_dir_all(&dest)?;
+    unpack_zip_into(archive, &dest)
+}
+
+/// Extract a `.zip` directly into `dest` (no stem subfolder). Multiple archives
+/// can be extracted into the same `dest` to merge them.
+pub fn unpack_zip_into(archive: &Path, dest: &Path) -> Result<UnpackReport> {
+    std::fs::create_dir_all(dest)?;
 
     let file = std::fs::File::open(archive)?;
     let mut zip = zip::ZipArchive::new(file)
@@ -63,7 +69,7 @@ pub fn unpack_zip(archive: &Path, dest_root: &Path) -> Result<UnpackReport> {
 
     Ok(UnpackReport {
         source: archive.to_path_buf(),
-        dest,
+        dest: dest.to_path_buf(),
         files_written,
         nested_archives,
     })

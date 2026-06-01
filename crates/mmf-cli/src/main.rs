@@ -53,10 +53,13 @@ enum Command {
         #[arg(long, default_value_t = 60)]
         limit: usize,
     },
-    /// Download one or more releases by id.
+    /// Download one or more releases by id (unpacks, cleans, reorganizes).
     Download {
-        /// Object ids to download. Omit to download everything new.
+        /// Object ids to download.
         ids: Vec<u64>,
+        /// Keep the original .zip after unpacking (default: delete it).
+        #[arg(long)]
+        keep_archive: bool,
     },
     /// Unpack a downloaded archive into the unpack directory.
     Unpack {
@@ -92,7 +95,7 @@ async fn main() -> Result<()> {
             undownloaded,
             limit,
         } => list(month, creator, search, undownloaded, limit).await,
-        Command::Download { ids } => download(ids).await,
+        Command::Download { ids, keep_archive } => download(ids, keep_archive).await,
         Command::Unpack { archive } => unpack(archive),
         Command::Sync => sync().await,
     }
@@ -393,7 +396,7 @@ async fn list(
     Ok(())
 }
 
-async fn download(ids: Vec<u64>) -> Result<()> {
+async fn download(ids: Vec<u64>, keep_archive: bool) -> Result<()> {
     use indicatif::{ProgressBar, ProgressStyle};
 
     if ids.is_empty() {
@@ -403,75 +406,50 @@ async fn download(ids: Vec<u64>) -> Result<()> {
     let token = mmf_core::auth::access_token(&config.client_id)
         .await
         .context("get access token (run `minihoard login` first)")?;
-    let client = mmf_core::api::Client::with_bearer(token.clone());
-    let data_dir = Config::default_data_dir()?;
-    let mut manifest = mmf_core::manifest::Manifest::load(&data_dir)?;
+    let cookie = mmf_core::auth::TokenStore::session_cookie()?;
 
-    for id in ids {
-        let object = client
-            .get(&format!("/objects/{id}"))
-            .await
-            .with_context(|| format!("fetch object {id}"))?;
-        let name = object["name"].as_str().unwrap_or("object").to_string();
-        let files = object["files"]["items"].as_array().cloned().unwrap_or_default();
-
-        if files.is_empty() {
-            println!("object {id} ({name}): no downloadable files (do you own it?)");
-            continue;
-        }
-        println!("object {id}: {name} — {} file(s)", files.len());
-        let dest_dir = config.download_dir.join(id.to_string());
-        let mut written: Vec<String> = Vec::new();
-
-        for file in files {
-            let Some(url) = file["download_url"].as_str() else {
-                println!("  skipping a file with no download_url (not owned?)");
-                continue;
-            };
-            let filename = file["filename"].as_str().unwrap_or("download.bin").to_string();
-            let dest = dest_dir.join(&filename);
-
-            let pb = ProgressBar::new(0);
-            pb.set_style(
-                ProgressStyle::with_template(
-                    "  {msg} [{bar:30}] {bytes}/{total_bytes} {bytes_per_sec}",
-                )
-                .unwrap()
-                .progress_chars("=>-"),
-            );
-            pb.set_message(filename.clone());
-
-            let report = mmf_core::download::download_to(url, &dest, &token, |done, total| {
-                if let Some(t) = total {
-                    pb.set_length(t);
-                }
-                pb.set_position(done);
-            })
-            .await
-            .with_context(|| format!("download {filename}"))?;
-
-            pb.finish_with_message(format!(
-                "{filename} ({} MB{})",
-                report.bytes / 1_048_576,
-                if report.resumed { ", resumed" } else { "" }
-            ));
-
-            // Auto-unpack zip archives into the unpack directory.
-            if config.defaults.unpack && mmf_core::unpack::is_archive(&dest) {
-                match mmf_core::unpack::unpack_zip(&dest, &config.unpack_dir) {
-                    Ok(r) => println!("    unpacked {} files → {}", r.files_written, r.dest.display()),
-                    Err(e) => println!("    unpack failed: {e}"),
-                }
+    let pb = ProgressBar::new(0);
+    pb.set_style(
+        ProgressStyle::with_template("  {msg} [{bar:30}] {bytes}/{total_bytes} {bytes_per_sec}")
+            .unwrap()
+            .progress_chars("=>-"),
+    );
+    let mut current = String::new();
+    let outcomes = mmf_core::pipeline::download_objects(
+        &config,
+        &token,
+        cookie.as_deref(),
+        &ids,
+        &mmf_core::pipeline::Options { keep_archive },
+        |fname, done, total| {
+            if fname != current {
+                current = fname.to_string();
+                pb.set_message(current.clone());
+                pb.set_position(0);
             }
-            written.push(filename);
-        }
+            if let Some(t) = total {
+                pb.set_length(t);
+            }
+            pb.set_position(done);
+        },
+    )
+    .await?;
+    pb.finish_and_clear();
 
-        if !written.is_empty() {
-            manifest.record(id, &name, written, now_unix());
-            manifest.save(&data_dir)?;
-        }
+    for o in &outcomes {
+        println!(
+            "✓ {} ({} MB, {} files) → {}",
+            o.name,
+            o.bytes / 1_048_576,
+            o.file_count,
+            o.dir.display()
+        );
     }
-    println!("Done. Files in {}", config.download_dir.display());
+    if outcomes.is_empty() {
+        println!("Nothing downloaded (do you own the given ids?).");
+    } else {
+        println!("\nClean releases under {}", config.unpack_dir.display());
+    }
     Ok(())
 }
 
@@ -534,13 +512,6 @@ fn prompt_optional(label: &str) -> Result<Option<String>> {
 fn prompt_path(label: &str, default: PathBuf) -> Result<PathBuf> {
     let s = prompt(label, Some(default.display().to_string()))?;
     Ok(PathBuf::from(shellexpand_tilde(&s)))
-}
-
-fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 /// Minimal `~` expansion so the wizard accepts `~/foo` paths.

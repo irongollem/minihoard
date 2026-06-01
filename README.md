@@ -39,13 +39,17 @@ system keychain — so headless/automated use never prompts.
 minihoard list --month 2026-06            # filter by release month
 minihoard list --creator "one page rules" # by creator
 minihoard list --search dragon --undownloaded
-minihoard download 806054 806051          # download (auto-unpacks zips)
+minihoard download 806054 806051          # download, unpack, clean, reorganize
+minihoard download 806054 --keep-archive  # ...but keep the original .zip
 minihoard unpack FILE.zip                 # unpack a local archive
 minihoard whoami                          # show the logged-in account
 ```
 
-`list` marks items you've already downloaded; downloads are tracked in a local
-manifest.
+`download` produces ready-to-use releases: each object is unpacked into
+`<unpack_dir>/{creator}-{MM-YYYY}/{release}/`, macOS artifacts (`__MACOSX/`,
+`.DS_Store`, `._*`) are stripped, and the `.zip` is deleted (unless
+`--keep-archive`). `list` marks items already downloaded; downloads are tracked
+in a local manifest.
 
 ## MCP server (talk to an assistant)
 
@@ -74,8 +78,8 @@ Then ask it to browse and download; it previews sizes before fetching.
 
 ## Roadmap
 
-- Restructure downloads into stl-pack's `{designer}-{MM-YYYY}` layout and repack
-  as tar + zstd (with a crate shared with stl-pack).
+- Optional repack as tar + zstd (and chunked archives) for off-site backup,
+  sharing the format with stl-pack.
 - Per-source filters/grouping (Tribes / shared / Kickstarter / store).
 
 ## License

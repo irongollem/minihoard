@@ -148,12 +148,6 @@ fn ids_arg(args: &Value) -> Result<Vec<u64>> {
     Ok(ids)
 }
 
-fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
 
 async fn status() -> Result<String> {
     let config = mmf_core::Config::load()?;
@@ -281,38 +275,31 @@ async fn preview_download(ids: Vec<u64>) -> Result<String> {
 async fn download_objects(ids: Vec<u64>) -> Result<String> {
     let config = mmf_core::Config::load()?;
     let token = mmf_core::auth::access_token(&config.client_id).await?;
-    let client = mmf_core::api::Client::with_bearer(token.clone());
-    let data_dir = mmf_core::Config::default_data_dir()?;
-    let mut manifest = mmf_core::manifest::Manifest::load(&data_dir)?;
+    let cookie = mmf_core::auth::TokenStore::session_cookie()?;
 
-    let mut out = String::new();
-    for id in ids {
-        let (name, files) = object_files(&client, id).await?;
-        if files.is_empty() {
-            out.push_str(&format!("id={id} {name}: no downloadable files (owned?)\n"));
-            continue;
-        }
-        let dest_dir = config.download_dir.join(id.to_string());
-        let mut written = Vec::new();
-        for f in &files {
-            let Some(url) = f["download_url"].as_str() else { continue };
-            let fname = f["filename"].as_str().unwrap_or("download.bin").to_string();
-            let dest = dest_dir.join(&fname);
-            let report = mmf_core::download::download_to(url, &dest, &token, |_, _| {}).await?;
-            let mut line = format!("  {fname} ({} MB)", report.bytes / 1_048_576);
-            if config.defaults.unpack && mmf_core::unpack::is_archive(&dest) {
-                if let Ok(r) = mmf_core::unpack::unpack_zip(&dest, &config.unpack_dir) {
-                    line.push_str(&format!(" → unpacked {} files", r.files_written));
-                }
-            }
-            out.push_str(&format!("id={id} {name}\n{line}\n"));
-            written.push(fname);
-        }
-        if !written.is_empty() {
-            manifest.record(id, &name, written, now_unix());
-            manifest.save(&data_dir)?;
-        }
+    let outcomes = mmf_core::pipeline::download_objects(
+        &config,
+        &token,
+        cookie.as_deref(),
+        &ids,
+        &mmf_core::pipeline::Options::default(),
+        |_, _, _| {},
+    )
+    .await?;
+
+    if outcomes.is_empty() {
+        return Ok("Nothing downloaded — none of the given ids had files (do you own them?).".into());
     }
-    out.push_str(&format!("\nDone. Files under {}", config.download_dir.display()));
+    let mut out = String::new();
+    for o in &outcomes {
+        out.push_str(&format!(
+            "✓ {} ({} MB, {} files) → {}\n",
+            o.name,
+            o.bytes / 1_048_576,
+            o.file_count,
+            o.dir.display()
+        ));
+    }
+    out.push_str(&format!("\nClean releases under {}", config.unpack_dir.display()));
     Ok(out)
 }

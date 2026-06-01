@@ -14,11 +14,13 @@
 
 pub mod api;
 pub mod auth;
+pub mod clean;
 pub mod config;
 pub mod download;
 pub mod error;
 pub mod library;
 pub mod manifest;
+pub mod pipeline;
 pub mod unpack;
 
 pub use config::Config;
