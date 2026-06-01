@@ -178,6 +178,30 @@ mod tests {
     }
 
     #[test]
+    fn collapses_wrapper_but_keeps_supported_unsupported_siblings() {
+        // The real MMF case: a single wrapper around a folder that itself has
+        // multiple sensible children. Collapse the wrapper, but NEVER merge or
+        // descend into Supported/Unsupported — they stay distinct siblings.
+        let base = tmp("minihoard-flat-siblings");
+        let dir = base.join("behir_presupported_dungeon_classics");
+        std::fs::create_dir_all(dir.join("Behir/Supported")).unwrap();
+        std::fs::create_dir_all(dir.join("Behir/Unsupported")).unwrap();
+        std::fs::write(dir.join("Behir/Supported/s.stl"), b"x").unwrap();
+        std::fs::write(dir.join("Behir/Unsupported/u.stl"), b"x").unwrap();
+        std::fs::write(dir.join("Behir/thumb.jpg"), b"x").unwrap();
+
+        let out = flatten_single_dir(&dir).unwrap();
+        assert_eq!(out, base.join("behir")); // wrapper removed, inner name adopted
+        // Both folders survive, side by side, contents intact and unmerged.
+        assert!(out.join("Supported/s.stl").exists());
+        assert!(out.join("Unsupported/u.stl").exists());
+        assert!(out.join("thumb.jpg").exists());
+        assert!(out.join("Supported").is_dir());
+        assert!(out.join("Unsupported").is_dir());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
     fn does_not_flatten_when_other_content_present() {
         let base = tmp("minihoard-flat-2");
         let dir = base.join("rel");
