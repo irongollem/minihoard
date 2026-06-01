@@ -38,6 +38,11 @@ minihoard setup-mcp
 That's it — it edits `claude_desktop_config.json` automatically. Restart Claude
 Desktop, then ask it to browse and download your library.
 
+The MCP tools are `status`, `list_library`, `preview_download`, `download_objects`,
+and `job_status`. Downloads run in the **background**: `download_objects` returns
+a job id right away and the assistant polls `job_status` to report live progress
+("3 of 5 done, downloading Behir…") instead of blocking silently on a big batch.
+
 ## Setup
 
 ```sh

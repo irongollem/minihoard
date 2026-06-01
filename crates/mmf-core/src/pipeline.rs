@@ -50,14 +50,16 @@ fn month_label(entry: Option<&LibraryEntry>) -> String {
 }
 
 /// Download + organize the given object ids. `cookie` (optional) is used only to
-/// fetch library metadata for nicer foldering. `on_file(filename, done, total)`
-/// reports per-file progress.
+/// fetch library metadata for nicer foldering. `on_object(index, total, name)`
+/// is called as each object starts (index is 1-based); `on_file(filename, done,
+/// total)` reports per-file byte progress within the current object.
 pub async fn download_objects(
     config: &Config,
     token: &str,
     cookie: Option<&str>,
     ids: &[u64],
     opts: &Options,
+    mut on_object: impl FnMut(usize, usize, &str),
     mut on_file: impl FnMut(&str, u64, Option<u64>),
 ) -> Result<Vec<Outcome>> {
     // Library metadata (creator + month) for nicer folders; optional.
@@ -77,7 +79,7 @@ pub async fn download_objects(
     let mut manifest = crate::manifest::Manifest::load(&data_dir)?;
     let mut outcomes = Vec::new();
 
-    for &id in ids {
+    for (i, &id) in ids.iter().enumerate() {
         let object = client.get(&format!("/objects/{id}")).await?;
         let entry = meta.get(&id);
 
@@ -86,6 +88,7 @@ pub async fn download_objects(
             .filter(|n| !n.is_empty())
             .or_else(|| object["name"].as_str().map(String::from))
             .unwrap_or_else(|| format!("object-{id}"));
+        on_object(i + 1, ids.len(), &name);
         let creator = entry
             .and_then(|e| e.creator_name.clone())
             .or_else(|| object["designer"]["name"].as_str().map(String::from))

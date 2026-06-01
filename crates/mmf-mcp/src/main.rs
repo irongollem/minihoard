@@ -4,11 +4,41 @@
 //! download by chat. Hand-rolled protocol (newline-delimited JSON-RPC) to avoid
 //! SDK churn. Logs go to stderr only — stdout is the protocol channel.
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex};
+
 use anyhow::Result;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-#[tokio::main(flavor = "current_thread")]
+/// Progress state for one background download job. Long downloads run detached
+/// so the assistant can poll `job_status` and narrate, instead of the MCP call
+/// blocking silently for minutes.
+#[derive(Default, Clone)]
+struct Job {
+    total: usize,
+    done: usize,
+    object: String,
+    current: String,
+    phase: String,
+    finished: bool,
+    summary: String,
+    error: Option<String>,
+}
+
+static JOBS: LazyLock<Mutex<HashMap<u64, Job>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static JOB_SEQ: AtomicU64 = AtomicU64::new(1);
+
+fn update_job(id: u64, f: impl FnOnce(&mut Job)) {
+    if let Ok(mut m) = JOBS.lock() {
+        if let Some(j) = m.get_mut(&id) {
+            f(j);
+        }
+    }
+}
+
+#[tokio::main]
 async fn main() -> Result<()> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut stdout = tokio::io::stdout();
@@ -113,13 +143,23 @@ fn tool_defs() -> Value {
         },
         {
             "name": "download_objects",
-            "description": "Download the given object ids (all their files), auto-unpack zips, and record them. Confirm with the user first using preview_download.",
+            "description": "Start downloading the given object ids (all their files), auto-unpack zips, clean, and reorganize. Runs in the BACKGROUND and returns immediately with a job id — it does NOT block until done. Confirm with the user first using preview_download, then poll job_status with the returned id to report progress.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "ids": { "type": "array", "items": { "type": "integer" }, "description": "Object ids" }
                 },
                 "required": ["ids"]
+            }
+        },
+        {
+            "name": "job_status",
+            "description": "Check progress of a background download started by download_objects. Pass the job id to get that job's status (objects done/total, current item, phase), or omit it to list all jobs. Poll this every few seconds during a batch and relay progress to the user.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "job": { "type": "integer", "description": "Job id from download_objects (omit to list all jobs)" }
+                }
             }
         }
     ])
@@ -131,6 +171,7 @@ async fn call_tool(name: &str, args: Value) -> Result<String> {
         "list_library" => list_library(args).await,
         "preview_download" => preview_download(ids_arg(&args)?).await,
         "download_objects" => download_objects(ids_arg(&args)?).await,
+        "job_status" => job_status(args).await,
         other => anyhow::bail!("unknown tool: {other}"),
     }
 }
@@ -272,34 +313,126 @@ async fn preview_download(ids: Vec<u64>) -> Result<String> {
     Ok(out)
 }
 
+/// Kick off a background download and return a job id immediately. Auth/config
+/// are validated up-front so obvious failures surface synchronously; the actual
+/// transfer + unpack runs detached and is observed via `job_status`.
 async fn download_objects(ids: Vec<u64>) -> Result<String> {
     let config = mmf_core::Config::load()?;
     let token = mmf_core::auth::access_token(&config.client_id).await?;
     let cookie = mmf_core::auth::TokenStore::session_cookie()?;
 
-    let outcomes = mmf_core::pipeline::download_objects(
-        &config,
-        &token,
-        cookie.as_deref(),
-        &ids,
-        &mmf_core::pipeline::Options::default(),
-        |_, _, _| {},
-    )
-    .await?;
+    let job_id = JOB_SEQ.fetch_add(1, Ordering::Relaxed);
+    JOBS.lock().unwrap().insert(
+        job_id,
+        Job {
+            total: ids.len(),
+            phase: "starting".into(),
+            current: "preparing…".into(),
+            ..Default::default()
+        },
+    );
 
-    if outcomes.is_empty() {
-        return Ok("Nothing downloaded — none of the given ids had files (do you own them?).".into());
+    let count = ids.len();
+    tokio::spawn(async move {
+        let result = mmf_core::pipeline::download_objects(
+            &config,
+            &token,
+            cookie.as_deref(),
+            &ids,
+            &mmf_core::pipeline::Options::default(),
+            |i, n, name| {
+                update_job(job_id, |j| {
+                    j.total = n;
+                    j.done = i.saturating_sub(1);
+                    j.phase = "downloading".into();
+                    j.object = name.to_string();
+                    j.current = format!("downloading {name}");
+                });
+            },
+            |fname, done, total| {
+                update_job(job_id, |j| {
+                    let pct = match total {
+                        Some(t) if t > 0 => format!(" {}%", done * 100 / t),
+                        _ => String::new(),
+                    };
+                    j.current = format!("{} — {fname}{pct}", j.object);
+                });
+            },
+        )
+        .await;
+
+        match result {
+            Ok(outcomes) => update_job(job_id, |j| {
+                j.finished = true;
+                j.done = j.total;
+                j.phase = "done".into();
+                j.current = "done".into();
+                if outcomes.is_empty() {
+                    j.summary =
+                        "Nothing downloaded — none of the ids had files (do you own them?)."
+                            .into();
+                } else {
+                    let mut s = format!("Downloaded {} object(s):", outcomes.len());
+                    for o in &outcomes {
+                        s.push_str(&format!(
+                            "\n✓ {} ({} MB, {} files) → {}",
+                            o.name,
+                            o.bytes / 1_048_576,
+                            o.file_count,
+                            o.dir.display()
+                        ));
+                    }
+                    j.summary = s;
+                }
+            }),
+            Err(e) => update_job(job_id, |j| {
+                j.finished = true;
+                j.phase = "error".into();
+                j.current = "error".into();
+                j.error = Some(e.to_string());
+            }),
+        }
+    });
+
+    Ok(format!(
+        "Started background job #{job_id} for {count} object(s). It runs in the background — \
+         call job_status with job={job_id} every few seconds to follow progress and report it \
+         to the user."
+    ))
+}
+
+async fn job_status(args: Value) -> Result<String> {
+    let map = JOBS
+        .lock()
+        .map_err(|_| anyhow::anyhow!("job registry unavailable"))?;
+    if let Some(id) = args["job"].as_u64() {
+        let job = map
+            .get(&id)
+            .ok_or_else(|| anyhow::anyhow!("no job #{id}"))?;
+        return Ok(render_job(id, job));
     }
+    if map.is_empty() {
+        return Ok("No download jobs yet.".into());
+    }
+    let mut ids: Vec<u64> = map.keys().copied().collect();
+    ids.sort_unstable();
     let mut out = String::new();
-    for o in &outcomes {
-        out.push_str(&format!(
-            "✓ {} ({} MB, {} files) → {}\n",
-            o.name,
-            o.bytes / 1_048_576,
-            o.file_count,
-            o.dir.display()
-        ));
+    for id in ids {
+        out.push_str(&render_job(id, &map[&id]));
+        out.push('\n');
     }
-    out.push_str(&format!("\nClean releases under {}", config.unpack_dir.display()));
     Ok(out)
+}
+
+fn render_job(id: u64, j: &Job) -> String {
+    if let Some(e) = &j.error {
+        return format!("Job #{id}: ERROR after {}/{} — {e}", j.done, j.total);
+    }
+    if j.finished {
+        return format!("Job #{id}: ✅ done ({}/{}).\n{}", j.done, j.total, j.summary);
+    }
+    format!(
+        "Job #{id}: {} — {}/{} objects done. Current: {}",
+        j.phase, j.done, j.total, j.current
+    )
 }

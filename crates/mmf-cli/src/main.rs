@@ -685,6 +685,7 @@ async fn download(targets: Vec<String>, keep_archive: bool, filters: DownloadFil
         cookie.as_deref(),
         &ids,
         &mmf_core::pipeline::Options { keep_archive },
+        |i, n, name| pb.println(format!("→ [{i}/{n}] {name}")),
         |fname, done, total| {
             if fname != current {
                 current = fname.to_string();
