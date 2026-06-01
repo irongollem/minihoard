@@ -825,11 +825,10 @@ fn unpack(archive: PathBuf, delete_archive: bool) -> Result<()> {
         println!("Unpacked {} files to {}", n, config.unpack_dir.display());
     } else {
         let report = mmf_core::unpack::unpack_zip(&archive, &config.unpack_dir)?;
-        println!(
-            "Unpacked {} files to {}",
-            report.files_written,
-            report.dest.display()
-        );
+        mmf_core::clean::strip_apple_artifacts(&report.dest);
+        let dest = mmf_core::clean::flatten_single_dir(&report.dest)
+            .unwrap_or_else(|_| report.dest.clone());
+        println!("Unpacked {} files to {}", report.files_written, dest.display());
         if !report.nested_archives.is_empty() {
             println!("Found {} nested archive(s):", report.nested_archives.len());
             for a in &report.nested_archives {

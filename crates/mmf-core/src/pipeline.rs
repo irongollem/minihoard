@@ -129,10 +129,10 @@ pub async fn download_objects(
             written.push(filename);
         }
 
-        let removed = strip_apple_artifacts(&target);
-        if removed > 0 {
-            // recount not needed; just informational via outcome.file_count
-        }
+        strip_apple_artifacts(&target);
+        // Collapse redundant single-folder nesting (a zip that held one top
+        // folder). May rename `target` to the inner folder's name.
+        let final_dir = crate::clean::flatten_single_dir(&target).unwrap_or(target);
 
         manifest.record(id, &name, written, now_unix());
         manifest.save(&data_dir)?;
@@ -140,7 +140,7 @@ pub async fn download_objects(
         outcomes.push(Outcome {
             id,
             name,
-            dir: target,
+            dir: final_dir,
             bytes: total_bytes,
             file_count,
         });

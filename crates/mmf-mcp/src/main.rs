@@ -606,7 +606,11 @@ async fn unpack(args: Value) -> Result<String> {
         let result = if mmf_core::pack::is_tar_zst(&archive) {
             mmf_core::pack::unpack_tar_zst(&archive, &dest)
         } else {
-            mmf_core::unpack::unpack_zip(&archive, &dest).map(|r| r.files_written)
+            mmf_core::unpack::unpack_zip(&archive, &dest).map(|r| {
+                mmf_core::clean::strip_apple_artifacts(&r.dest);
+                let _ = mmf_core::clean::flatten_single_dir(&r.dest);
+                r.files_written
+            })
         };
         match result {
             Ok(n) => {

@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
 
+use crate::clean::is_apple_artifact;
 use crate::error::{Error, Result};
 
 /// Output archive format.
@@ -129,6 +130,17 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
+/// Walk `src` skipping macOS artifacts (`.DS_Store`, `._*`, `__MACOSX/`). Used by
+/// every pack-time walk so the measured size, the archive, and the sidecar index
+/// all agree and never carry Finder cruft, regardless of what's on disk. Pruning
+/// happens via `filter_entry` so `__MACOSX` directories aren't descended into.
+fn walk_packable(src: &Path) -> impl Iterator<Item = walkdir::DirEntry> {
+    WalkDir::new(src)
+        .into_iter()
+        .filter_entry(|e| !is_apple_artifact(&e.file_name().to_string_lossy()))
+        .filter_map(|e| e.ok())
+}
+
 /// Categorize a file by extension for the sidecar index.
 fn classify(path: &Path) -> &'static str {
     let ext = path
@@ -148,9 +160,7 @@ fn classify(path: &Path) -> &'static str {
 /// `src`'s parent (so the top folder is included, matching the archive layout).
 fn collect_entries(src: &Path) -> Vec<Entry> {
     let parent = src.parent().unwrap_or(src);
-    WalkDir::new(src)
-        .into_iter()
-        .filter_map(|e| e.ok())
+    walk_packable(src)
         .filter(|e| e.file_type().is_file())
         .map(|e| {
             let path = e.path();
@@ -216,7 +226,7 @@ pub fn parse_size(s: &str) -> Result<u64> {
 fn measure(src: &Path) -> Result<(u64, usize)> {
     let mut bytes = 0u64;
     let mut count = 0usize;
-    for entry in WalkDir::new(src).into_iter().filter_map(|e| e.ok()) {
+    for entry in walk_packable(src) {
         if entry.file_type().is_file() {
             bytes += entry.metadata().map(|m| m.len()).unwrap_or(0);
             count += 1;
@@ -344,7 +354,7 @@ fn pack_tar_zst(
     {
         let mut builder = tar::Builder::new(&mut encoder);
         builder.follow_symlinks(false);
-        for entry in WalkDir::new(src).into_iter().filter_map(|e| e.ok()) {
+        for entry in walk_packable(src) {
             let path = entry.path();
             // Keep the top folder: archive paths are relative to src's parent.
             let rel = path.strip_prefix(parent).unwrap_or(path);
@@ -388,7 +398,7 @@ fn pack_zip(
 
     let mut buf = Vec::new();
     let mut done = 0u64;
-    for entry in WalkDir::new(src).into_iter().filter_map(|e| e.ok()) {
+    for entry in walk_packable(src) {
         let path = entry.path();
         // Archive paths are relative to src's parent so the top folder is kept.
         let rel = path
@@ -720,6 +730,43 @@ mod tests {
         assert_eq!(n, 2);
         assert!(dest.join("Release-06-2026/a.stl").exists());
         assert!(dest.join("Release-06-2026/sub/b.stl").exists());
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn skips_apple_artifacts_at_pack_time() {
+        let tmp = std::env::temp_dir().join("minihoard-pack-apple");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let src = tmp.join("creator-06-2026").join("Release");
+        make_tree(&src);
+        // Finder cruft that may reappear between download and pack.
+        std::fs::write(src.join(".DS_Store"), b"junk").unwrap();
+        std::fs::write(src.join("._a.stl"), b"junk").unwrap();
+        std::fs::create_dir_all(src.join("__MACOSX")).unwrap();
+        std::fs::write(src.join("__MACOSX/ignore"), b"junk").unwrap();
+        let out = tmp.join("out");
+
+        let report = pack_dir(&src, &out, &PackOptions::default(), |_| {}).unwrap();
+        // measure() and the sidecar agree, counting only the two real .stl files.
+        assert_eq!(report.file_count, 2);
+        let sidecar: Sidecar =
+            serde_json::from_str(&std::fs::read_to_string(report.sidecar.unwrap()).unwrap())
+                .unwrap();
+        assert_eq!(sidecar.file_count, 2);
+        assert!(
+            !sidecar.entries.iter().any(|e| e.path.contains(".DS_Store")
+                || e.path.contains("._")
+                || e.path.contains("__MACOSX")),
+            "apple artifacts leaked into sidecar: {:?}",
+            sidecar.entries.iter().map(|e| &e.path).collect::<Vec<_>>()
+        );
+
+        // And they're absent from the actual archive on restore.
+        let dest = tmp.join("restored");
+        unpack_tar_zst(&report.outputs[0], &dest).unwrap();
+        assert!(dest.join("Release/a.stl").exists());
+        assert!(!dest.join("Release/.DS_Store").exists());
+        assert!(!dest.join("Release/__MACOSX").exists());
         std::fs::remove_dir_all(&tmp).ok();
     }
 

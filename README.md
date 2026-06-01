@@ -90,6 +90,12 @@ unpacked into `<unpack_dir>/{creator}-{MM-YYYY}/{release}/`, macOS artifacts
 to fetch. (Searching by name needs the session cookie; ids don't.) `list` marks
 items already downloaded; downloads are tracked in a local manifest.
 
+Redundant nesting is collapsed automatically: if an archive contains nothing but
+a single top-level folder (the common `Release/Release/files` case), that wrapper
+is removed and the release folder takes the inner folder's name — so you get
+`{creator}-{MM-YYYY}/{release}/files`, not a doubled-up path. (`unpack` does the
+same.)
+
 For the monthly drop, batch a whole set with the same filters `list` uses —
 `--month`, `--creator`, `--search`, `--undownloaded`. `get` previews the matches
 and asks before downloading (use `-y` to skip the prompt). For example,
