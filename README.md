@@ -1,58 +1,83 @@
 # minihoard
 
-A Rust CLI to fetch your [MyMiniFactory](https://www.myminifactory.com/) library,
-unpack it, and (later) restructure + repack it for archival and cataloging
-alongside [stl-pack](https://github.com/irongollem/stl-pack).
+A Rust CLI **and** MCP server to fetch your [MyMiniFactory](https://www.myminifactory.com/)
+library, unpack it, and (soon) restructure + repack it for archival and
+cataloging alongside [stl-pack](https://github.com/irongollem/stl-pack).
 
-> Status: **early scaffolding.** `configure` and `unpack` work; auth, listing,
-> and download are stubbed pending the M0 feasibility spike (see below).
+Browse and download from the terminal, or talk to an assistant (via the MCP
+server) — "show me June's Tribe releases", "download these".
 
-## Why
+## Install
 
-Every month you want to pull your new MMF releases and pack them for storage and
-later cataloging. `minihoard` automates: **login → list → download → unpack**,
-with restructure/repack to come.
+**Download a prebuilt binary** (no toolchain needed) from the
+[latest release](https://github.com/irongollem/minihoard/releases/latest):
 
-## Architecture
+- Windows: `minihoard-x86_64-pc-windows-msvc.exe` (+ `minihoard-mcp-…exe`)
+- macOS (Apple Silicon): `minihoard-aarch64-apple-darwin` (+ `minihoard-mcp-…`)
 
-A Cargo workspace:
+Rename them to `minihoard`/`minihoard-mcp` (or `.exe`) and put them on your PATH.
 
-- `crates/mmf-core` — all logic as a library (auth, API client, download,
-  unpack). Built as a lib so the CLI and a future MCP server stay thin.
-- `crates/mmf-cli` — the `minihoard` binary.
+**Or build from source** — needs Rust, plus CMake and (on Windows) NASM for
+BoringSSL: `cargo build --release`.
 
-Non-secret settings live in `config.toml`
-(`~/Library/Application Support/minihoard/` on macOS). The OAuth **refresh
-token** is stored in the OS keychain, never on disk.
+## Setup
+
+```sh
+minihoard configure    # API client id (+ secret) and download/unpack folders
+minihoard login        # one-time browser OAuth (stores a refresh token)
+minihoard set-cookie   # paste your MMF website Cookie header (for library listing)
+```
+
+Why a cookie? Downloads use OAuth, but the full **library listing** endpoint is
+gated on the website session cookie, so you paste it once (re-paste when it
+expires). Secrets are stored in a `0600` file in the app config dir — **not** a
+system keychain — so headless/automated use never prompts.
 
 ## Commands
 
-```
-minihoard configure   # first-run wizard: API client id + directories
-minihoard login       # browser OAuth, stores refresh token        (M2)
-minihoard logout      # clear stored credentials
-minihoard list        # show available releases                    (M4)
-minihoard download    # download releases by id, or all new        (M5)
-minihoard unpack FILE # extract a downloaded .zip
-minihoard sync        # monthly flow: list -> download -> unpack    (M7)
+```sh
+minihoard list --month 2026-06            # filter by release month
+minihoard list --creator "one page rules" # by creator
+minihoard list --search dragon --undownloaded
+minihoard download 806054 806051          # download (auto-unpacks zips)
+minihoard unpack FILE.zip                 # unpack a local archive
+minihoard whoami                          # show the logged-in account
 ```
 
-## ⚠️ Open question (M0 spike)
+`list` marks items you've already downloaded; downloads are tracked in a local
+manifest.
 
-The documented MMF API exposes your **published** objects, **liked** objects,
-and **collections** — there is no clearly documented "things I purchased /
-subscribed to" endpoint. Download URLs work only for an OAuth-connected user.
-The first build step authenticates and confirms we can list and download an
-item you actually own, before investing in the rest.
+## MCP server (talk to an assistant)
+
+`minihoard-mcp` is a stdio MCP server exposing `status`, `list_library`,
+`preview_download`, and `download_objects`. Point your MCP client at it, e.g.
+Claude Desktop (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "minihoard": { "command": "/path/to/minihoard-mcp" }
+  }
+}
+```
+
+Then ask it to browse and download; it previews sizes before fetching.
+
+## How it works
+
+- **Auth**: OAuth2 Authorization Code via a localhost loopback redirect.
+- **Discovery**: the website's `data-library/objectPreviews` endpoint lists the
+  whole library (id, name, creator, release month, added date).
+- **Download**: object files via the OAuth API; the download host is behind
+  Cloudflare, so requests use a Chrome-impersonating client to pass the bot
+  check, with resumable streaming.
 
 ## Roadmap
 
-- Restructure unpacked releases into stl-pack's `{designer}-{MM-YYYY}-{release}`
-  layout (generated `release.json` / `model.json`, `supported/` detection).
-- Repack as **tar + zstd** (primary), then optional 2/4 GB multi-volume split
-  for off-site backup.
-- MCP server facade over `mmf-core`.
+- Restructure downloads into stl-pack's `{designer}-{MM-YYYY}` layout and repack
+  as tar + zstd (with a crate shared with stl-pack).
+- Per-source filters/grouping (Tribes / shared / Kickstarter / store).
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
