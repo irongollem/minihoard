@@ -60,7 +60,11 @@ minihoard list --creator "one page rules" # by creator
 minihoard list --search dragon --undownloaded
 minihoard download 806054 806051          # download, unpack, clean, reorganize
 minihoard download 806054 --keep-archive  # ...but keep the original .zip
-minihoard unpack FILE.zip                 # unpack a local archive
+minihoard pack ~/mmf/Creator-06-2026      # repack a folder for backup (tar.zst)
+minihoard pack DIR --format zip           # ...as a broadly-supported .zip
+minihoard pack DIR --split 4G             # ...split into 4 GB volumes (tar.zst)
+minihoard unpack FILE.zip                 # restore a .zip or .tar.zst archive
+minihoard unpack FILE.tar.zst.001         # ...or a split archive (first volume)
 minihoard whoami                          # show the logged-in account
 minihoard upgrade                         # update to the latest release
 ```
@@ -70,6 +74,23 @@ minihoard upgrade                         # update to the latest release
 `.DS_Store`, `._*`) are stripped, and the `.zip` is deleted (unless
 `--keep-archive`). `list` marks items already downloaded; downloads are tracked
 in a local manifest.
+
+### Packing for backup
+
+`pack` turns a clean release folder into a single archive for off-site backup.
+Two formats:
+
+- **`tar.zst`** (default) — best compression and speed, and the only format
+  that can be split into fixed-size volumes (`--split 4G`) for chunked backup.
+  It's a stream, so reading one file means decompressing the archive. Restore
+  with `minihoard unpack`, or with standard tools
+  (`zstd -dc a.tar.zst | tar -x`; for splits, `cat a.tar.zst.* | zstd -dc | tar -x`).
+- **`zip`** (`--format zip`) — broadly supported, native double-click
+  extraction, and random-access (a catalog can read one entry without unpacking
+  everything). Single file only — no `--split`.
+
+`--level N` sets the zstd level (1–22, default 19). Compression runs
+multi-threaded across your cores.
 
 ## How it works
 
@@ -82,8 +103,7 @@ in a local manifest.
 
 ## Roadmap
 
-- Optional repack as tar + zstd (and chunked archives) for off-site backup,
-  sharing the format with stl-pack.
+- `download --pack` to repack each release right after downloading.
 - Per-source filters/grouping (Tribes / shared / Kickstarter / store).
 
 ## License

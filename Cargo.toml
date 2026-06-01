@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/mmf-core", "crates/mmf-cli", "crates/mmf-mcp"]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 authors = ["Jeffrey Ernst"]
@@ -43,6 +43,8 @@ uuid = { version = "1", features = ["v4"] }
 
 # unpack + integrity
 zip = "2"
+tar = "0.4"
+zstd = { version = "0.13", features = ["zstdmt"] }
 sha2 = "0.10"
 walkdir = "2"
 

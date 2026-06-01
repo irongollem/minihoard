@@ -11,6 +11,7 @@
 //! - M5  [`download`] resumable downloads
 //! - M6  [`unpack`] nested-archive extraction (zip done)
 //! - M7  sync orchestration + state manifest
+//! - M8  [`pack`] repack releases as tar.zst / zip for backup (split volumes)
 
 pub mod api;
 pub mod auth;
@@ -20,6 +21,7 @@ pub mod download;
 pub mod error;
 pub mod library;
 pub mod manifest;
+pub mod pack;
 pub mod pipeline;
 pub mod unpack;
 

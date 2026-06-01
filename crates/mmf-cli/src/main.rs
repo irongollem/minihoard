@@ -63,9 +63,27 @@ enum Command {
         #[arg(long)]
         keep_archive: bool,
     },
-    /// Unpack a downloaded archive into the unpack directory.
+    /// Repack release folder(s) into archives for off-site backup.
+    Pack {
+        /// One or more release folders to pack (each becomes its own archive).
+        paths: Vec<PathBuf>,
+        /// Archive format: `tarzst` (best compression, splittable) or `zip`
+        /// (broadly supported, native extraction).
+        #[arg(long, default_value = "tarzst")]
+        format: String,
+        /// zstd compression level 1-22 (tar.zst only).
+        #[arg(long, default_value_t = 19)]
+        level: i32,
+        /// Split into fixed-size volumes, e.g. 2G or 4G (tar.zst only).
+        #[arg(long)]
+        split: Option<String>,
+        /// Output directory (default: alongside each source folder).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Unpack a downloaded archive (.zip or .tar.zst) into the unpack directory.
     Unpack {
-        /// Path to a `.zip` archive.
+        /// Path to a `.zip` or `.tar.zst` archive (a `.001` volume for splits).
         archive: PathBuf,
     },
     /// Run the full monthly flow: list -> download new -> unpack.
@@ -102,6 +120,13 @@ async fn main() -> Result<()> {
             limit,
         } => list(month, creator, search, undownloaded, limit).await,
         Command::Download { ids, keep_archive } => download(ids, keep_archive).await,
+        Command::Pack {
+            paths,
+            format,
+            level,
+            split,
+            out,
+        } => pack(paths, format, level, split, out),
         Command::Unpack { archive } => unpack(archive),
         Command::Sync => sync().await,
         Command::Upgrade => upgrade().await,
@@ -461,8 +486,90 @@ async fn download(ids: Vec<u64>, keep_archive: bool) -> Result<()> {
     Ok(())
 }
 
+fn pack(
+    paths: Vec<PathBuf>,
+    format: String,
+    level: i32,
+    split: Option<String>,
+    out: Option<PathBuf>,
+) -> Result<()> {
+    use indicatif::{ProgressBar, ProgressStyle};
+    use mmf_core::pack::{pack_dir, parse_size, PackFormat, PackOptions};
+
+    if paths.is_empty() {
+        anyhow::bail!("give one or more folders, e.g. `minihoard pack ~/mmf/Creator-06-2026`");
+    }
+    let format = PackFormat::parse(&format)?;
+    let split_bytes = match split {
+        Some(s) => Some(parse_size(&s)?),
+        None => None,
+    };
+    let opts = PackOptions {
+        format,
+        level,
+        split_bytes,
+    };
+
+    for src in &paths {
+        let src = src.as_path();
+        let out_dir = match &out {
+            Some(o) => o.clone(),
+            None => src.parent().unwrap_or_else(|| std::path::Path::new(".")).to_path_buf(),
+        };
+
+        let pb = ProgressBar::new(0);
+        pb.set_style(
+            ProgressStyle::with_template("  {msg} [{bar:30}] {bytes}/{total_bytes}")
+                .unwrap()
+                .progress_chars("=>-"),
+        );
+        let label = src
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("archive")
+            .to_string();
+        pb.set_message(label.clone());
+
+        let report = pack_dir(src, &out_dir, &opts, |done| {
+            pb.set_position(done);
+        })
+        .with_context(|| format!("pack {}", src.display()))?;
+        pb.set_length(report.input_bytes);
+        pb.finish_and_clear();
+
+        let ratio = (report.output_bytes * 100)
+            .checked_div(report.input_bytes)
+            .map(|pct| 100 - pct)
+            .unwrap_or(0);
+        let parts = if report.outputs.len() > 1 {
+            format!(", {} volumes", report.outputs.len())
+        } else {
+            String::new()
+        };
+        println!(
+            "✓ {} ({} files, {} MB → {} MB, {}% smaller{}) → {}",
+            label,
+            report.file_count,
+            report.input_bytes / 1_048_576,
+            report.output_bytes / 1_048_576,
+            ratio,
+            parts,
+            report.outputs[0].display(),
+        );
+    }
+    Ok(())
+}
+
 fn unpack(archive: PathBuf) -> Result<()> {
     let config = Config::load()?;
+
+    if mmf_core::pack::is_tar_zst(&archive) {
+        let dest = &config.unpack_dir;
+        let n = mmf_core::pack::unpack_tar_zst(&archive, dest)?;
+        println!("Unpacked {} files to {}", n, dest.display());
+        return Ok(());
+    }
+
     let report = mmf_core::unpack::unpack_zip(&archive, &config.unpack_dir)?;
     println!(
         "Unpacked {} files to {}",
