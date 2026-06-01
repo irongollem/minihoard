@@ -1,0 +1,23 @@
+[package]
+name = "mmf-cli"
+description = "minihoard CLI: fetch, unpack, and pack your MyMiniFactory library"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "minihoard"
+path = "src/main.rs"
+
+[dependencies]
+mmf-core = { path = "../mmf-core" }
+tokio.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+indicatif.workspace = true
+directories.workspace = true

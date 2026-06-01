@@ -1,0 +1,55 @@
+[workspace]
+resolver = "2"
+members = ["crates/mmf-core", "crates/mmf-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Jeffrey Ernst"]
+repository = "https://github.com/irongollem/minihoard"
+
+[workspace.dependencies]
+# async runtime + http
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "json",
+    "stream",
+] }
+futures-util = "0.3"
+# TLS-impersonating client for the Cloudflare-fronted download host
+wreq = "6.0.0-rc"
+wreq-util = "3.0.0-rc"
+
+# serde + config
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+directories = "5"
+
+# cli + ux
+clap = { version = "4", features = ["derive", "env"] }
+indicatif = "0.17"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# auth + secrets
+keyring = { version = "3", features = ["apple-native"] }
+tiny_http = "0.12"
+url = "2"
+open = "5"
+uuid = { version = "1", features = ["v4"] }
+
+# unpack + integrity
+zip = "2"
+sha2 = "0.10"
+walkdir = "2"
+
+# errors
+thiserror = "2"
+anyhow = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
