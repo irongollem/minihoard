@@ -227,20 +227,24 @@ fn configure() -> Result<()> {
     }
 
     let data_dir = Config::default_data_dir()?;
-    let download_dir = prompt_path(
-        "Download directory",
-        existing
-            .as_ref()
-            .map(|c| c.download_dir.clone())
-            .unwrap_or_else(|| data_dir.join("downloads")),
-    )?;
+    let library_dir = Config::default_library_dir()?;
+    println!(
+        "\nWhere should your unpacked releases be stored? Pick a visible, user-owned\n\
+         folder (your config and download history stay in the app's data dir)."
+    );
     let unpack_dir = prompt_path(
-        "Unpack directory",
+        "Library (unpack) directory",
         existing
             .as_ref()
             .map(|c| c.unpack_dir.clone())
-            .unwrap_or_else(|| data_dir.join("unpacked")),
+            .unwrap_or(library_dir),
     )?;
+    // download_dir is legacy (everything lands in the unpack dir now); keep the
+    // existing value or default it alongside the library.
+    let download_dir = existing
+        .as_ref()
+        .map(|c| c.download_dir.clone())
+        .unwrap_or_else(|| data_dir.join("downloads"));
 
     let config = Config {
         client_id,

@@ -74,10 +74,26 @@ impl Config {
         Ok(dirs.config_dir().join("credentials.json"))
     }
 
-    /// Default base directory for downloads/unpacks (`~/.../minihoard/data`).
+    /// Default base directory for app *state* — config, manifest, credentials
+    /// (`~/Library/Application Support/...` on macOS). Hidden on purpose; this is
+    /// NOT where user-facing content should land.
     pub fn default_data_dir() -> Result<PathBuf> {
         let dirs = project_dirs()?;
         Ok(dirs.data_dir().to_path_buf())
+    }
+
+    /// Default location for the *library* (unpacked releases) — a visible,
+    /// user-owned folder, not the hidden app-data dir. Prefers
+    /// `<Downloads>/minihoard`, falling back to `<home>/minihoard`, then the
+    /// data dir as a last resort.
+    pub fn default_library_dir() -> Result<PathBuf> {
+        if let Some(dirs) = directories::UserDirs::new() {
+            if let Some(dl) = dirs.download_dir() {
+                return Ok(dl.join("minihoard"));
+            }
+            return Ok(dirs.home_dir().join("minihoard"));
+        }
+        Ok(Self::default_data_dir()?.join("unpacked"))
     }
 
     /// Load config from the default path.
