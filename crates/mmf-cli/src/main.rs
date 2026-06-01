@@ -5,6 +5,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use mmf_core::config::Config;
 
+const REPO: &str = "irongollem/minihoard";
+
 #[derive(Parser)]
 #[command(
     name = "minihoard",
@@ -68,6 +70,10 @@ enum Command {
     },
     /// Run the full monthly flow: list -> download new -> unpack.
     Sync,
+    /// Update minihoard and minihoard-mcp to the latest release.
+    Upgrade,
+    /// Register minihoard-mcp in Claude Desktop (edits claude_desktop_config.json).
+    SetupMcp,
 }
 
 #[tokio::main]
@@ -98,6 +104,8 @@ async fn main() -> Result<()> {
         Command::Download { ids, keep_archive } => download(ids, keep_archive).await,
         Command::Unpack { archive } => unpack(archive),
         Command::Sync => sync().await,
+        Command::Upgrade => upgrade().await,
+        Command::SetupMcp => setup_mcp(),
     }
 }
 
@@ -473,6 +481,148 @@ fn unpack(archive: PathBuf) -> Result<()> {
 async fn sync() -> Result<()> {
     let _config = Config::load()?;
     anyhow::bail!("`sync` arrives in milestone M7");
+}
+
+/// Returns the release-asset target triple for the current platform.
+fn current_target() -> Result<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => Ok("aarch64-apple-darwin"),
+        ("macos", "x86_64") => Ok("x86_64-apple-darwin"),
+        ("windows", "x86_64") => Ok("x86_64-pc-windows-msvc"),
+        (os, arch) => anyhow::bail!("no prebuilt binary for {os}/{arch}"),
+    }
+}
+
+async fn upgrade() -> Result<()> {
+    let current = env!("CARGO_PKG_VERSION");
+    let target = current_target()?;
+
+    // Fetch latest release tag via GitHub API.
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("minihoard/", env!("CARGO_PKG_VERSION")))
+        .build()?;
+    let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
+    let resp: serde_json::Value = client.get(&url).send().await?.json().await?;
+    let tag = resp["tag_name"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("unexpected GitHub API response"))?;
+
+    // Tags are "vX.Y.Z"; strip the leading 'v' to compare with CARGO_PKG_VERSION.
+    let latest = tag.trim_start_matches('v');
+    if latest == current {
+        println!("Already up to date (v{current}).");
+        return Ok(());
+    }
+    println!("Upgrading minihoard v{current} → v{latest}…");
+
+    let exe = std::env::current_exe().context("cannot find current executable path")?;
+    let bin_dir = exe.parent().context("cannot determine binary directory")?;
+
+    #[cfg(windows)]
+    let ext = ".exe";
+    #[cfg(not(windows))]
+    let ext = "";
+
+    for bin in ["minihoard", "minihoard-mcp"] {
+        let url = format!(
+            "https://github.com/{REPO}/releases/download/{tag}/{bin}-{target}{ext}"
+        );
+        print!("  {bin}… ");
+        io::stdout().flush()?;
+
+        let bytes = client.get(&url).send().await?.bytes().await?;
+        let dest = bin_dir.join(format!("{bin}{ext}"));
+
+        // Write to a sibling temp file, then rename over the target (atomic on Unix;
+        // on Windows, renaming over a running exe succeeds because the OS keeps the
+        // original file handle open until the process exits).
+        let tmp = bin_dir.join(format!(".{bin}.tmp{ext}"));
+        std::fs::write(&tmp, &bytes)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+        }
+
+        std::fs::rename(&tmp, &dest)
+            .with_context(|| format!("replace {}", dest.display()))?;
+        println!("done");
+    }
+
+    println!("Updated to v{latest}.");
+    Ok(())
+}
+
+fn setup_mcp() -> Result<()> {
+    // Locate the minihoard-mcp binary (expected next to the current exe).
+    let exe = std::env::current_exe().context("cannot find current executable path")?;
+    let bin_dir = exe.parent().context("cannot determine binary directory")?;
+
+    #[cfg(windows)]
+    let mcp_bin = bin_dir.join("minihoard-mcp.exe");
+    #[cfg(not(windows))]
+    let mcp_bin = bin_dir.join("minihoard-mcp");
+
+    if !mcp_bin.exists() {
+        anyhow::bail!(
+            "minihoard-mcp not found at {}\n\
+             Make sure both binaries are in the same directory, or run the installer again.",
+            mcp_bin.display()
+        );
+    }
+
+    let config_path = claude_desktop_config_path()?;
+
+    let mut config: serde_json::Value = if config_path.exists() {
+        let s = std::fs::read_to_string(&config_path)
+            .with_context(|| format!("read {}", config_path.display()))?;
+        serde_json::from_str(&s).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    if config.get("mcpServers").is_none() {
+        config["mcpServers"] = serde_json::json!({});
+    }
+    config["mcpServers"]["minihoard"] = serde_json::json!({
+        "command": mcp_bin.display().to_string()
+    });
+
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
+
+    println!("Registered minihoard-mcp in Claude Desktop.");
+    println!("Config: {}", config_path.display());
+    println!("\nRestart Claude Desktop to apply.");
+    Ok(())
+}
+
+fn claude_desktop_config_path() -> Result<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let dirs = directories::UserDirs::new()
+            .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
+        Ok(dirs
+            .home_dir()
+            .join("Library/Application Support/Claude/claude_desktop_config.json"))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let appdata =
+            std::env::var("APPDATA").context("APPDATA environment variable not set")?;
+        Ok(PathBuf::from(appdata).join("Claude/claude_desktop_config.json"))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let dirs = directories::UserDirs::new()
+            .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
+        Ok(dirs
+            .home_dir()
+            .join(".config/Claude/claude_desktop_config.json"))
+    }
 }
 
 fn prompt(label: &str, default: Option<String>) -> Result<String> {
