@@ -55,10 +55,12 @@ enum Command {
         #[arg(long, default_value_t = 60)]
         limit: usize,
     },
-    /// Download one or more releases by id (unpacks, cleans, reorganizes).
+    /// Get one or more releases by id or name (downloads, unpacks, cleans,
+    /// reorganizes — leaves clean releases on disk).
+    #[command(visible_alias = "get")]
     Download {
-        /// Object ids to download.
-        ids: Vec<u64>,
+        /// Object ids (e.g. 806054) or names to search for (e.g. "dragon").
+        targets: Vec<String>,
         /// Keep the original .zip after unpacking (default: delete it).
         #[arg(long)]
         keep_archive: bool,
@@ -126,7 +128,7 @@ async fn main() -> Result<()> {
             undownloaded,
             limit,
         } => list(month, creator, search, undownloaded, limit).await,
-        Command::Download { ids, keep_archive } => download(ids, keep_archive).await,
+        Command::Download { targets, keep_archive } => download(targets, keep_archive).await,
         Command::Pack {
             paths,
             format,
@@ -440,17 +442,114 @@ async fn list(
     Ok(())
 }
 
-async fn download(ids: Vec<u64>, keep_archive: bool) -> Result<()> {
+/// Turn a mix of numeric ids and search terms into a deduped list of object
+/// ids. Numeric tokens pass through; name tokens are matched (case-insensitive,
+/// across name/creator/tags) against the library. A term with several matches
+/// prompts an interactive pick; a term with none warns and is skipped.
+async fn resolve_targets(targets: &[String], cookie: Option<&str>) -> Result<Vec<u64>> {
+    use std::collections::BTreeSet;
+
+    let mut ids: BTreeSet<u64> = BTreeSet::new();
+    let mut names: Vec<&str> = Vec::new();
+    for t in targets {
+        match t.trim().parse::<u64>() {
+            Ok(id) => {
+                ids.insert(id);
+            }
+            Err(_) => names.push(t.trim()),
+        }
+    }
+    if names.is_empty() {
+        return Ok(ids.into_iter().collect());
+    }
+
+    // Names need the library, which is gated on the website session cookie.
+    let cookie = cookie.ok_or_else(|| {
+        anyhow::anyhow!(
+            "searching by name needs your library — run `minihoard set-cookie` first, \
+             or pass the numeric id"
+        )
+    })?;
+    let library = mmf_core::library::dedupe(mmf_core::library::fetch_library(cookie).await?);
+
+    for term in names {
+        let needle = term.to_lowercase();
+        let matches: Vec<&mmf_core::library::LibraryEntry> = library
+            .iter()
+            .filter(|e| {
+                e.name.to_lowercase().contains(&needle)
+                    || e.creator_name
+                        .as_deref()
+                        .is_some_and(|c| c.to_lowercase().contains(&needle))
+                    || e.tags.iter().any(|t| t.to_lowercase().contains(&needle))
+            })
+            .collect();
+
+        match matches.as_slice() {
+            [] => eprintln!("No match for \"{term}\" — skipping."),
+            [one] => {
+                println!("\"{term}\" → {} ({})", one.name, one.original_id);
+                ids.insert(one.original_id);
+            }
+            many => {
+                for id in pick_matches(term, many)? {
+                    ids.insert(id);
+                }
+            }
+        }
+    }
+    Ok(ids.into_iter().collect())
+}
+
+/// Print numbered matches and let the user choose (numbers, `all`, or blank to
+/// skip). Returns the chosen object ids.
+fn pick_matches(term: &str, matches: &[&mmf_core::library::LibraryEntry]) -> Result<Vec<u64>> {
+    println!("\n\"{term}\" matches {} items:", matches.len());
+    for (i, e) in matches.iter().enumerate() {
+        let creator = e.creator_name.as_deref().unwrap_or("?");
+        let month = e.month_label().unwrap_or_else(|| "—".to_string());
+        println!("  [{}] {} — {} ({}) #{}", i + 1, e.name, creator, month, e.original_id);
+    }
+    let choice = prompt("Pick numbers (e.g. 1 3), `all`, or blank to skip", None)?;
+    let choice = choice.trim();
+    if choice.is_empty() {
+        return Ok(Vec::new());
+    }
+    if choice.eq_ignore_ascii_case("all") {
+        return Ok(matches.iter().map(|e| e.original_id).collect());
+    }
+    let mut out = Vec::new();
+    for tok in choice.split(|c: char| c.is_whitespace() || c == ',') {
+        if tok.is_empty() {
+            continue;
+        }
+        let n: usize = tok
+            .parse()
+            .with_context(|| format!("not a number: {tok}"))?;
+        let e = matches
+            .get(n - 1)
+            .ok_or_else(|| anyhow::anyhow!("out of range: {n}"))?;
+        out.push(e.original_id);
+    }
+    Ok(out)
+}
+
+async fn download(targets: Vec<String>, keep_archive: bool) -> Result<()> {
     use indicatif::{ProgressBar, ProgressStyle};
 
-    if ids.is_empty() {
-        anyhow::bail!("give one or more object ids, e.g. `minihoard download 806054`");
+    if targets.is_empty() {
+        anyhow::bail!("give one or more ids or names, e.g. `minihoard get 806054` or `minihoard get dragon`");
     }
     let config = Config::load()?;
     let token = mmf_core::auth::access_token(&config.client_id)
         .await
         .context("get access token (run `minihoard login` first)")?;
     let cookie = mmf_core::auth::TokenStore::session_cookie()?;
+
+    let ids = resolve_targets(&targets, cookie.as_deref()).await?;
+    if ids.is_empty() {
+        anyhow::bail!("nothing matched — try `minihoard list --search <term>` to find ids");
+    }
 
     let pb = ProgressBar::new(0);
     pb.set_style(

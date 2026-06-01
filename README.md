@@ -58,8 +58,9 @@ keychain, so headless/automated use never prompts.
 minihoard list --month 2026-06            # filter by release month
 minihoard list --creator "one page rules" # by creator
 minihoard list --search dragon --undownloaded
-minihoard download 806054 806051          # download, unpack, clean, reorganize
-minihoard download 806054 --keep-archive  # ...but keep the original .zip
+minihoard get 806054 806051               # by id: download, unpack, clean, reorganize
+minihoard get "dragon knight"             # by name: search, pick, then the same
+minihoard get 806054 --keep-archive       # ...but keep the original .zip
 minihoard pack ~/mmf/Creator-06-2026      # repack a folder for backup (tar.zst)
 minihoard pack DIR --format zip           # ...as a broadly-supported .zip
 minihoard pack DIR --split 4G             # ...split into 4 GB volumes (tar.zst)
@@ -70,11 +71,13 @@ minihoard whoami                          # show the logged-in account
 minihoard upgrade                         # update to the latest release
 ```
 
-`download` produces ready-to-use releases: each object is unpacked into
-`<unpack_dir>/{creator}-{MM-YYYY}/{release}/`, macOS artifacts (`__MACOSX/`,
-`.DS_Store`, `._*`) are stripped, and the `.zip` is deleted (unless
-`--keep-archive`). `list` marks items already downloaded; downloads are tracked
-in a local manifest.
+`get` (alias of `download`) is the one-shot command: give it object ids or a
+name to search for, and it produces ready-to-use releases — each object is
+unpacked into `<unpack_dir>/{creator}-{MM-YYYY}/{release}/`, macOS artifacts
+(`__MACOSX/`, `.DS_Store`, `._*`) are stripped, and the `.zip` is deleted
+(unless `--keep-archive`). A name that matches several items lets you pick which
+to fetch. (Searching by name needs the session cookie; ids don't.) `list` marks
+items already downloaded; downloads are tracked in a local manifest.
 
 ### Packing for backup
 
