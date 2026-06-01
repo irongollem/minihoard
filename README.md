@@ -38,10 +38,13 @@ minihoard setup-mcp
 That's it — it edits `claude_desktop_config.json` automatically. Restart Claude
 Desktop, then ask it to browse and download your library.
 
-The MCP tools are `status`, `list_library`, `preview_download`, `download_objects`,
-and `job_status`. Downloads run in the **background**: `download_objects` returns
-a job id right away and the assistant polls `job_status` to report live progress
-("3 of 5 done, downloading Behir…") instead of blocking silently on a big batch.
+The MCP exposes `status`, `config`, `list_library`, `preview_download`,
+`download_objects`, `pack`, `unpack`, and `job_status` — so you can browse,
+download, repack, and restore entirely by chat. The long-running tools
+(`download_objects`, `pack`, `unpack`) run in the **background**: they return a
+job id right away and the assistant polls `job_status` to report live progress
+("3 of 5 done, downloading Behir…") instead of blocking silently — which would
+otherwise trip the client's tool-call timeout on a big batch.
 
 ## Setup
 
@@ -74,6 +77,7 @@ minihoard pack DIR --split 4G             # ...split into 4 GB volumes (tar.zst)
 minihoard unpack FILE.zip                 # restore a .zip or .tar.zst archive
 minihoard unpack FILE.tar.zst.001         # ...or a split archive (first volume)
 minihoard unpack FILE.tar.zst --delete-archive  # ...and remove it once extracted
+minihoard where                           # show config + where files are stored
 minihoard whoami                          # show the logged-in account
 minihoard upgrade                         # update to the latest release
 ```

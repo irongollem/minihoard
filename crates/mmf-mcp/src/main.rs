@@ -154,12 +154,44 @@ fn tool_defs() -> Value {
         },
         {
             "name": "job_status",
-            "description": "Check progress of a background download started by download_objects. Pass the job id to get that job's status (objects done/total, current item, phase), or omit it to list all jobs. Poll this every few seconds during a batch and relay progress to the user.",
+            "description": "Check progress of a background job started by download_objects, pack, or unpack. Pass the job id for that job's status (done/total, current item, phase), or omit it to list all jobs. Poll this every few seconds during long work and relay progress to the user.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "job": { "type": "integer", "description": "Job id from download_objects (omit to list all jobs)" }
+                    "job": { "type": "integer", "description": "Job id (omit to list all jobs)" }
                 }
+            }
+        },
+        {
+            "name": "config",
+            "description": "Show the current configuration and where files are stored — the unpack/downloads location, config file, manifest, and data dir. Use when the user asks where their downloads or releases are.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "pack",
+            "description": "Repack release folder(s) into archives for backup. Runs in the BACKGROUND and returns a job id immediately — poll job_status. tar.zst is best compression and supports --split into fixed-size volumes (e.g. 4G chunks); zip is broadly supported but single-file. Each archive gets a .json sidecar index.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "paths": { "type": "array", "items": { "type": "string" }, "description": "Folders to pack (each becomes its own archive)" },
+                    "format": { "type": "string", "enum": ["tarzst", "zip"], "description": "Archive format (default tarzst)" },
+                    "level": { "type": "integer", "description": "zstd level 1-22 (default 19; tar.zst only)" },
+                    "split": { "type": "string", "description": "Volume size for chunked backup, e.g. 4G or 2G (tar.zst only)" },
+                    "out": { "type": "string", "description": "Output directory (default: alongside each source folder)" }
+                },
+                "required": ["paths"]
+            }
+        },
+        {
+            "name": "unpack",
+            "description": "Extract a .zip or .tar.zst archive (point at the .001 volume for a split set) into the unpack directory. Runs in the BACKGROUND and returns a job id — poll job_status. Optionally delete the archive (all volumes + sidecar) after a successful extraction.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "archive": { "type": "string", "description": "Path to a .zip or .tar.zst archive" },
+                    "delete_archive": { "type": "boolean", "description": "Delete the archive after extracting (default false)" }
+                },
+                "required": ["archive"]
             }
         }
     ])
@@ -172,6 +204,9 @@ async fn call_tool(name: &str, args: Value) -> Result<String> {
         "preview_download" => preview_download(ids_arg(&args)?).await,
         "download_objects" => download_objects(ids_arg(&args)?).await,
         "job_status" => job_status(args).await,
+        "config" => config_info().await,
+        "pack" => pack(args).await,
+        "unpack" => unpack(args).await,
         other => anyhow::bail!("unknown tool: {other}"),
     }
 }
@@ -432,7 +467,173 @@ fn render_job(id: u64, j: &Job) -> String {
         return format!("Job #{id}: ✅ done ({}/{}).\n{}", j.done, j.total, j.summary);
     }
     format!(
-        "Job #{id}: {} — {}/{} objects done. Current: {}",
+        "Job #{id}: {} — {}/{} done. Current: {}",
         j.phase, j.done, j.total, j.current
     )
+}
+
+async fn config_info() -> Result<String> {
+    match mmf_core::Config::load() {
+        Ok(cfg) => Ok(cfg.describe()),
+        Err(mmf_core::Error::ConfigMissing(p)) => Ok(format!(
+            "No config yet (expected at {}). Run `minihoard configure` in a terminal.",
+            p.display()
+        )),
+        Err(e) => Err(e.into()),
+    }
+}
+
+async fn pack(args: Value) -> Result<String> {
+    use mmf_core::pack::{parse_size, PackFormat, PackOptions};
+
+    let paths: Vec<std::path::PathBuf> = args["paths"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("`paths` must be an array of folder paths"))?
+        .iter()
+        .filter_map(|v| v.as_str().map(std::path::PathBuf::from))
+        .collect();
+    if paths.is_empty() {
+        anyhow::bail!("no folders given to pack");
+    }
+    let format = PackFormat::parse(args["format"].as_str().unwrap_or("tarzst"))?;
+    let level = args["level"].as_i64().unwrap_or(19) as i32;
+    let split_bytes = match args["split"].as_str() {
+        Some(s) => Some(parse_size(s)?),
+        None => None,
+    };
+    let out = args["out"].as_str().map(std::path::PathBuf::from);
+
+    let job_id = JOB_SEQ.fetch_add(1, Ordering::Relaxed);
+    JOBS.lock().unwrap().insert(
+        job_id,
+        Job {
+            total: paths.len(),
+            phase: "packing".into(),
+            current: "starting…".into(),
+            ..Default::default()
+        },
+    );
+
+    let count = paths.len();
+    tokio::task::spawn_blocking(move || {
+        let mut summary = String::new();
+        for (i, src) in paths.iter().enumerate() {
+            let name = src
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("archive")
+                .to_string();
+            update_job(job_id, |j| {
+                j.done = i;
+                j.object = name.clone();
+                j.current = format!("packing {name}");
+            });
+            let out_dir = out.clone().unwrap_or_else(|| {
+                src.parent().unwrap_or_else(|| std::path::Path::new(".")).to_path_buf()
+            });
+            let opts = PackOptions {
+                format,
+                level,
+                split_bytes,
+                write_sidecar: true,
+            };
+            let nm = name.clone();
+            match mmf_core::pack::pack_dir(src, &out_dir, &opts, |done| {
+                update_job(job_id, |j| {
+                    j.current = format!("packing {nm} — {} MB written", done / 1_048_576);
+                });
+            }) {
+                Ok(report) => summary.push_str(&format!(
+                    "\n✓ {name} ({} files, {} MB → {} MB{}) → {}",
+                    report.file_count,
+                    report.input_bytes / 1_048_576,
+                    report.output_bytes / 1_048_576,
+                    if report.outputs.len() > 1 {
+                        format!(", {} volumes", report.outputs.len())
+                    } else {
+                        String::new()
+                    },
+                    report.outputs[0].display(),
+                )),
+                Err(e) => {
+                    update_job(job_id, |j| {
+                        j.finished = true;
+                        j.phase = "error".into();
+                        j.error = Some(format!("packing {name}: {e}"));
+                    });
+                    return;
+                }
+            }
+        }
+        update_job(job_id, |j| {
+            j.finished = true;
+            j.done = j.total;
+            j.phase = "done".into();
+            j.current = "done".into();
+            j.summary = format!("Packed {} folder(s):{summary}", j.total);
+        });
+    });
+
+    Ok(format!(
+        "Started background pack job #{job_id} for {count} folder(s). Poll job_status with job={job_id}."
+    ))
+}
+
+async fn unpack(args: Value) -> Result<String> {
+    let archive = args["archive"]
+        .as_str()
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("`archive` (path) is required"))?;
+    let delete = args["delete_archive"].as_bool().unwrap_or(false);
+    let config = mmf_core::Config::load()?;
+    let dest = config.unpack_dir.clone();
+
+    let job_id = JOB_SEQ.fetch_add(1, Ordering::Relaxed);
+    JOBS.lock().unwrap().insert(
+        job_id,
+        Job {
+            total: 1,
+            phase: "unpacking".into(),
+            current: format!(
+                "extracting {}",
+                archive.file_name().and_then(|s| s.to_str()).unwrap_or("archive")
+            ),
+            ..Default::default()
+        },
+    );
+
+    tokio::task::spawn_blocking(move || {
+        let result = if mmf_core::pack::is_tar_zst(&archive) {
+            mmf_core::pack::unpack_tar_zst(&archive, &dest)
+        } else {
+            mmf_core::unpack::unpack_zip(&archive, &dest).map(|r| r.files_written)
+        };
+        match result {
+            Ok(n) => {
+                let mut note = String::new();
+                if delete {
+                    match mmf_core::pack::remove_archive_files(&archive) {
+                        Ok(removed) => note = format!(" Removed {removed} archive file(s).",),
+                        Err(e) => note = format!(" (could not delete archive: {e})"),
+                    }
+                }
+                update_job(job_id, |j| {
+                    j.finished = true;
+                    j.done = 1;
+                    j.phase = "done".into();
+                    j.current = "done".into();
+                    j.summary = format!("Unpacked {n} files to {}.{note}", dest.display());
+                });
+            }
+            Err(e) => update_job(job_id, |j| {
+                j.finished = true;
+                j.phase = "error".into();
+                j.error = Some(e.to_string());
+            }),
+        }
+    });
+
+    Ok(format!(
+        "Started background unpack job #{job_id}. Poll job_status with job={job_id}."
+    ))
 }

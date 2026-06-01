@@ -22,6 +22,9 @@ struct Cli {
 enum Command {
     /// Create or update the config file (interactive first-run wizard).
     Configure,
+    /// Show the current config and where files are stored (downloads, etc.).
+    #[command(visible_alias = "where")]
+    Config,
     /// Log in to MyMiniFactory via the browser (stores a refresh token).
     Login,
     /// Forget the stored credentials.
@@ -131,6 +134,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Configure => configure(),
+        Command::Config => show_config(),
         Command::Login => login().await,
         Command::Logout => logout(),
         Command::Whoami => whoami().await,
@@ -185,6 +189,18 @@ async fn main() -> Result<()> {
 
 /// Interactive first-run wizard. Writes a non-secret config file; secrets are
 /// captured later by `login`.
+fn show_config() -> Result<()> {
+    match Config::load() {
+        Ok(cfg) => println!("{}", cfg.describe()),
+        Err(mmf_core::Error::ConfigMissing(p)) => {
+            println!("No config yet (expected at {}).", p.display());
+            println!("Run `minihoard configure` to set it up.");
+        }
+        Err(e) => return Err(e.into()),
+    }
+    Ok(())
+}
+
 fn configure() -> Result<()> {
     println!("minihoard configuration\n");
     println!(

@@ -100,6 +100,49 @@ impl Config {
         self.save_to(&Self::default_path()?)
     }
 
+    /// Human-readable summary of where everything lives — for `minihoard config`
+    /// and the MCP `config` tool. Shows resolved paths (so you can find your
+    /// downloads) but no secrets, only the credentials *file path*.
+    pub fn describe(&self) -> String {
+        let mark = |p: &Path| if p.exists() { "" } else { "  (not created yet)" };
+        let s = |r: Result<PathBuf>| r.map(|p| p.display().to_string()).unwrap_or_else(|_| "?".into());
+
+        let cfg_path = s(Self::default_path());
+        let data_dir = Self::default_data_dir().ok();
+        let manifest = data_dir
+            .as_ref()
+            .map(|d| d.join("manifest.json").display().to_string())
+            .unwrap_or_else(|| "?".into());
+        let data_dir_s = data_dir
+            .map(|d| d.display().to_string())
+            .unwrap_or_else(|| "?".into());
+
+        format!(
+            "minihoard configuration\n\n\
+             📦 Your clean releases land in:\n   {unpack}{unpack_e}\n\n\
+             Config file:    {cfg}\n\
+             Data dir:       {data}\n\
+             Manifest:       {manifest}\n\
+             Credentials:    {creds}\n\
+             Download dir:   {dl}{dl_e}  (legacy — currently unused; releases go to the unpack dir)\n\n\
+             API client id:  {cid}\n\
+             OAuth redirect port: {port}\n\
+             Defaults: unpack={u}, verify_checksums={v}",
+            unpack = self.unpack_dir.display(),
+            unpack_e = mark(&self.unpack_dir),
+            cfg = cfg_path,
+            data = data_dir_s,
+            manifest = manifest,
+            creds = s(Self::credentials_path()),
+            dl = self.download_dir.display(),
+            dl_e = mark(&self.download_dir),
+            cid = self.client_id,
+            port = self.redirect_port,
+            u = self.defaults.unpack,
+            v = self.defaults.verify_checksums,
+        )
+    }
+
     /// Persist config to an explicit path.
     pub fn save_to(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
