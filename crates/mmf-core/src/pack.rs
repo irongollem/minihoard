@@ -56,6 +56,10 @@ pub struct PackOptions {
     pub level: i32,
     /// Roll output into volumes of this many bytes each (tar.zst only).
     pub split_bytes: Option<u64>,
+    /// Write a `<archive>.json` sidecar listing the contents (default: yes).
+    /// Lets a catalog see what's inside — especially for tar.zst, which has no
+    /// random access — without decompressing the archive.
+    pub write_sidecar: bool,
 }
 
 impl Default for PackOptions {
@@ -64,6 +68,7 @@ impl Default for PackOptions {
             format: PackFormat::TarZst,
             level: 19,
             split_bytes: None,
+            write_sidecar: true,
         }
     }
 }
@@ -72,9 +77,114 @@ impl Default for PackOptions {
 pub struct PackReport {
     /// Archive files written, in order (one, or many when split).
     pub outputs: Vec<PathBuf>,
+    /// The `<archive>.json` content index, if written.
+    pub sidecar: Option<PathBuf>,
     pub input_bytes: u64,
     pub output_bytes: u64,
     pub file_count: usize,
+}
+
+/// A `.json` index written beside an archive so its contents are knowable
+/// without decompressing it. Schema is versioned via [`Sidecar::schema`].
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct Sidecar {
+    /// Schema tag, e.g. `minihoard-pack/1`.
+    pub schema: String,
+    /// The packed folder's name (the release).
+    pub name: String,
+    /// Archive format: `tar.zst` or `zip`.
+    pub format: String,
+    /// Unix epoch seconds when packed.
+    pub created_unix: u64,
+    /// Creator, parsed from the parent `{creator}-{MM-YYYY}` folder if present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub creator: Option<String>,
+    /// Release month `MM-YYYY`, parsed from the parent folder if present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release_month: Option<String>,
+    pub file_count: usize,
+    pub uncompressed_bytes: u64,
+    pub compressed_bytes: u64,
+    /// Archive volume filenames in order (one, or many when split).
+    pub volumes: Vec<String>,
+    /// Every file in the archive, categorized for search/preview.
+    pub entries: Vec<Entry>,
+}
+
+/// One file inside a packed archive.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct Entry {
+    /// Path inside the archive (e.g. `DragonKnight/parts/arm.stl`).
+    pub path: String,
+    pub bytes: u64,
+    /// `model` | `image` | `doc` | `other` — lets a catalog find printable
+    /// meshes and preview images without opening the archive.
+    pub kind: String,
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Categorize a file by extension for the sidecar index.
+fn classify(path: &Path) -> &'static str {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "stl" | "obj" | "3mf" | "ply" | "step" | "stp" | "fbx" | "lys" | "ctb" | "blend" => "model",
+        "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tif" | "tiff" => "image",
+        "txt" | "pdf" | "md" | "rtf" | "doc" | "docx" | "nfo" => "doc",
+        _ => "other",
+    }
+}
+
+/// Collect every file under `src` as sidecar [`Entry`]s, paths relative to
+/// `src`'s parent (so the top folder is included, matching the archive layout).
+fn collect_entries(src: &Path) -> Vec<Entry> {
+    let parent = src.parent().unwrap_or(src);
+    WalkDir::new(src)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .map(|e| {
+            let path = e.path();
+            let rel = path.strip_prefix(parent).unwrap_or(path);
+            Entry {
+                path: rel.to_string_lossy().replace('\\', "/"),
+                bytes: e.metadata().map(|m| m.len()).unwrap_or(0),
+                kind: classify(path).to_string(),
+            }
+        })
+        .collect()
+}
+
+/// Parse a `{creator}-{MM-YYYY}` group folder name into `(creator, MM-YYYY)`.
+fn parse_group(parent: &Path) -> (Option<String>, Option<String>) {
+    let Some(name) = parent.file_name().and_then(|s| s.to_str()) else {
+        return (None, None);
+    };
+    // Expect a trailing `-MM-YYYY`.
+    let bytes = name.as_bytes();
+    if name.len() >= 8 {
+        let tail = &name[name.len() - 7..]; // `MM-YYYY`
+        let tb = tail.as_bytes();
+        let shaped = tb[2] == b'-'
+            && tb[..2].iter().all(|c| c.is_ascii_digit())
+            && tb[3..].iter().all(|c| c.is_ascii_digit());
+        if shaped && bytes[name.len() - 8] == b'-' {
+            let creator = &name[..name.len() - 8];
+            if !creator.is_empty() {
+                return (Some(creator.to_string()), Some(tail.to_string()));
+            }
+        }
+    }
+    (None, None)
 }
 
 /// Parse a human size like `2G`, `512M`, `4GB`, `1500000`. Binary units (×1024).
@@ -137,8 +247,8 @@ pub fn pack_dir(
 
     let (input_bytes, file_count) = measure(src)?;
 
-    match opts.format {
-        PackFormat::TarZst => pack_tar_zst(src, out_dir, name, opts, input_bytes, file_count, on_progress),
+    let (outputs, output_bytes) = match opts.format {
+        PackFormat::TarZst => pack_tar_zst(src, out_dir, name, opts, on_progress)?,
         PackFormat::Zip => {
             if opts.split_bytes.is_some() {
                 return Err(Error::Unpack(
@@ -146,9 +256,70 @@ pub fn pack_dir(
                         .to_string(),
                 ));
             }
-            pack_zip(src, out_dir, name, input_bytes, file_count, on_progress)
+            pack_zip(src, out_dir, name, on_progress)?
         }
-    }
+    };
+
+    let sidecar = if opts.write_sidecar {
+        Some(write_sidecar(
+            src,
+            name,
+            opts.format,
+            &outputs,
+            input_bytes,
+            output_bytes,
+        )?)
+    } else {
+        None
+    };
+
+    Ok(PackReport {
+        outputs,
+        sidecar,
+        input_bytes,
+        output_bytes,
+        file_count,
+    })
+}
+
+/// Write `<out_dir>/<name>.<ext>.json` describing the archive's contents.
+fn write_sidecar(
+    src: &Path,
+    name: &str,
+    format: PackFormat,
+    outputs: &[PathBuf],
+    input_bytes: u64,
+    output_bytes: u64,
+) -> Result<PathBuf> {
+    let entries = collect_entries(src);
+    let (creator, release_month) = match src.parent() {
+        Some(p) => parse_group(p),
+        None => (None, None),
+    };
+    let volumes = outputs
+        .iter()
+        .filter_map(|p| p.file_name().and_then(|s| s.to_str()).map(String::from))
+        .collect();
+    let sidecar = Sidecar {
+        schema: "minihoard-pack/1".to_string(),
+        name: name.to_string(),
+        format: format.ext().to_string(),
+        created_unix: now_unix(),
+        creator,
+        release_month,
+        file_count: entries.len(),
+        uncompressed_bytes: input_bytes,
+        compressed_bytes: output_bytes,
+        volumes,
+        entries,
+    };
+    // Sidecar is named after the logical archive, not a specific volume:
+    // `DragonKnight.tar.zst.json` / `DragonKnight.zip.json`.
+    let dir = outputs[0].parent().unwrap_or_else(|| Path::new("."));
+    let path = dir.join(format!("{name}.{}.json", format.ext()));
+    let json = serde_json::to_string_pretty(&sidecar)?;
+    std::fs::write(&path, json)?;
+    Ok(path)
 }
 
 fn pack_tar_zst(
@@ -156,10 +327,8 @@ fn pack_tar_zst(
     out_dir: &Path,
     name: &str,
     opts: &PackOptions,
-    input_bytes: u64,
-    file_count: usize,
     mut on_progress: impl FnMut(u64),
-) -> Result<PackReport> {
+) -> Result<(Vec<PathBuf>, u64)> {
     let base = format!("{name}.{}", PackFormat::TarZst.ext());
     let writer = SplitWriter::new(out_dir.to_path_buf(), base, opts.split_bytes);
 
@@ -201,24 +370,15 @@ fn pack_tar_zst(
     let writer = encoder
         .finish()
         .map_err(|e| Error::Unpack(format!("zstd finish: {e}")))?;
-    let (outputs, output_bytes) = writer.into_outputs()?;
-
-    Ok(PackReport {
-        outputs,
-        input_bytes,
-        output_bytes,
-        file_count,
-    })
+    writer.into_outputs()
 }
 
 fn pack_zip(
     src: &Path,
     out_dir: &Path,
     name: &str,
-    input_bytes: u64,
-    file_count: usize,
     mut on_progress: impl FnMut(u64),
-) -> Result<PackReport> {
+) -> Result<(Vec<PathBuf>, u64)> {
     let out_path = out_dir.join(format!("{name}.{}", PackFormat::Zip.ext()));
     let file = File::create(&out_path)?;
     let mut zip = zip::ZipWriter::new(file);
@@ -258,12 +418,7 @@ fn pack_zip(
         .map_err(|e| Error::Unpack(format!("zip finish: {e}")))?;
 
     let output_bytes = std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
-    Ok(PackReport {
-        outputs: vec![out_path],
-        input_bytes,
-        output_bytes,
-        file_count,
-    })
+    Ok((vec![out_path], output_bytes))
 }
 
 /// Best-effort core count for zstd's worker threads (1 if undetectable).
@@ -371,6 +526,44 @@ pub fn is_tar_zst(path: &Path) -> bool {
     name.ends_with(".tar.zst")
         || name.ends_with(".tzst")
         || (name.contains(".tar.zst.") && name.rsplit('.').next().is_some_and(|s| s.parse::<u32>().is_ok()))
+}
+
+/// Delete an archive and everything that belongs to it: all split volumes (for
+/// a `*.tar.zst.NNN` set) plus the `<archive>.json` sidecar. Use after a
+/// verified extraction. Returns the number of files removed. Works for `.zip`
+/// and single or split `.tar.zst`.
+pub fn remove_archive_files(archive: &Path) -> Result<usize> {
+    let mut removed = 0;
+    for v in resolve_volumes(archive)? {
+        if std::fs::remove_file(&v).is_ok() {
+            removed += 1;
+        }
+    }
+    if std::fs::remove_file(sidecar_path_for(archive)).is_ok() {
+        removed += 1;
+    }
+    Ok(removed)
+}
+
+/// The sidecar path for an archive: `<logical-archive>.json`. For a split
+/// volume `name.tar.zst.001` the logical archive is `name.tar.zst`.
+fn sidecar_path_for(archive: &Path) -> PathBuf {
+    let dir = archive.parent().unwrap_or_else(|| Path::new("."));
+    let name = archive
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    let logical = if name.contains(".tar.zst.")
+        && name
+            .rsplit('.')
+            .next()
+            .is_some_and(|s| s.len() == 3 && s.chars().all(|c| c.is_ascii_digit()))
+    {
+        &name[..name.rfind('.').unwrap()]
+    } else {
+        name
+    };
+    dir.join(format!("{logical}.json"))
 }
 
 /// Extract a tar.zst archive into `dest`. If `archive` is a split volume
@@ -531,6 +724,75 @@ mod tests {
     }
 
     #[test]
+    fn writes_sidecar_index() {
+        let tmp = std::env::temp_dir().join("minihoard-pack-sidecar");
+        let _ = std::fs::remove_dir_all(&tmp);
+        // Parent folder matches {creator}-{MM-YYYY} so it's parsed into metadata.
+        let src = tmp.join("one_page_rules-06-2026").join("DragonKnight");
+        make_tree(&src);
+        std::fs::write(src.join("render.png"), vec![0u8; 100]).unwrap();
+        let out = tmp.join("out");
+
+        let report = pack_dir(&src, &out, &PackOptions::default(), |_| {}).unwrap();
+        let sidecar = report.sidecar.expect("sidecar written");
+        assert!(sidecar.to_str().unwrap().ends_with("DragonKnight.tar.zst.json"));
+
+        let parsed: Sidecar =
+            serde_json::from_str(&std::fs::read_to_string(&sidecar).unwrap()).unwrap();
+        assert_eq!(parsed.creator.as_deref(), Some("one_page_rules"));
+        assert_eq!(parsed.release_month.as_deref(), Some("06-2026"));
+        assert_eq!(parsed.file_count, 3);
+        assert!(parsed.entries.iter().any(|e| e.kind == "model"));
+        assert!(parsed.entries.iter().any(|e| e.kind == "image"));
+        assert_eq!(parsed.volumes, vec!["DragonKnight.tar.zst".to_string()]);
+
+        // Removal cleans up the archive + sidecar.
+        let removed = remove_archive_files(&report.outputs[0]).unwrap();
+        assert_eq!(removed, 2); // archive + sidecar
+        assert!(!report.outputs[0].exists());
+        assert!(!sidecar.exists());
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn removes_all_split_volumes() {
+        let tmp = std::env::temp_dir().join("minihoard-pack-rmsplit");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let src = tmp.join("Big-06-2026");
+        std::fs::create_dir_all(&src).unwrap();
+        for i in 0..6u64 {
+            let mut state = i.wrapping_add(1).wrapping_mul(0x9E3779B97F4A7C15);
+            let data: Vec<u8> = (0..16384)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    (state & 0xff) as u8
+                })
+                .collect();
+            std::fs::write(src.join(format!("f{i}.bin")), data).unwrap();
+        }
+        let out = tmp.join("out");
+        let opts = PackOptions {
+            format: PackFormat::TarZst,
+            level: 1,
+            split_bytes: Some(16384),
+            write_sidecar: true,
+        };
+        let report = pack_dir(&src, &out, &opts, |_| {}).unwrap();
+        let volumes = report.outputs.len();
+        assert!(volumes > 1);
+
+        // Pass the .001 volume; all siblings + sidecar should go.
+        let removed = remove_archive_files(&report.outputs[0]).unwrap();
+        assert_eq!(removed, volumes + 1);
+        for v in &report.outputs {
+            assert!(!v.exists());
+        }
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
     fn zip_round_trip() {
         let tmp = std::env::temp_dir().join("minihoard-pack-zip");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -577,6 +839,7 @@ mod tests {
             format: PackFormat::TarZst,
             level: 1,
             split_bytes: Some(16384), // small volumes to force a split
+            write_sidecar: true,
         };
         let report = pack_dir(&src, &out, &opts, |_| {}).unwrap();
         assert!(

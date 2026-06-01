@@ -80,11 +80,18 @@ enum Command {
         /// Output directory (default: alongside each source folder).
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Don't write the `<archive>.json` content index.
+        #[arg(long)]
+        no_sidecar: bool,
     },
     /// Unpack a downloaded archive (.zip or .tar.zst) into the unpack directory.
     Unpack {
         /// Path to a `.zip` or `.tar.zst` archive (a `.001` volume for splits).
         archive: PathBuf,
+        /// Delete the archive (all split volumes + sidecar) after a successful
+        /// extraction.
+        #[arg(long)]
+        delete_archive: bool,
     },
     /// Run the full monthly flow: list -> download new -> unpack.
     Sync,
@@ -126,8 +133,12 @@ async fn main() -> Result<()> {
             level,
             split,
             out,
-        } => pack(paths, format, level, split, out),
-        Command::Unpack { archive } => unpack(archive),
+            no_sidecar,
+        } => pack(paths, format, level, split, out, no_sidecar),
+        Command::Unpack {
+            archive,
+            delete_archive,
+        } => unpack(archive, delete_archive),
         Command::Sync => sync().await,
         Command::Upgrade => upgrade().await,
         Command::SetupMcp => setup_mcp(),
@@ -492,6 +503,7 @@ fn pack(
     level: i32,
     split: Option<String>,
     out: Option<PathBuf>,
+    no_sidecar: bool,
 ) -> Result<()> {
     use indicatif::{ProgressBar, ProgressStyle};
     use mmf_core::pack::{pack_dir, parse_size, PackFormat, PackOptions};
@@ -508,6 +520,7 @@ fn pack(
         format,
         level,
         split_bytes,
+        write_sidecar: !no_sidecar,
     };
 
     for src in &paths {
@@ -556,31 +569,37 @@ fn pack(
             parts,
             report.outputs[0].display(),
         );
+        if let Some(s) = &report.sidecar {
+            println!("  index: {}", s.display());
+        }
     }
     Ok(())
 }
 
-fn unpack(archive: PathBuf) -> Result<()> {
+fn unpack(archive: PathBuf, delete_archive: bool) -> Result<()> {
     let config = Config::load()?;
 
     if mmf_core::pack::is_tar_zst(&archive) {
-        let dest = &config.unpack_dir;
-        let n = mmf_core::pack::unpack_tar_zst(&archive, dest)?;
-        println!("Unpacked {} files to {}", n, dest.display());
-        return Ok(());
+        let n = mmf_core::pack::unpack_tar_zst(&archive, &config.unpack_dir)?;
+        println!("Unpacked {} files to {}", n, config.unpack_dir.display());
+    } else {
+        let report = mmf_core::unpack::unpack_zip(&archive, &config.unpack_dir)?;
+        println!(
+            "Unpacked {} files to {}",
+            report.files_written,
+            report.dest.display()
+        );
+        if !report.nested_archives.is_empty() {
+            println!("Found {} nested archive(s):", report.nested_archives.len());
+            for a in &report.nested_archives {
+                println!("  {}", a.display());
+            }
+        }
     }
 
-    let report = mmf_core::unpack::unpack_zip(&archive, &config.unpack_dir)?;
-    println!(
-        "Unpacked {} files to {}",
-        report.files_written,
-        report.dest.display()
-    );
-    if !report.nested_archives.is_empty() {
-        println!("Found {} nested archive(s):", report.nested_archives.len());
-        for a in &report.nested_archives {
-            println!("  {}", a.display());
-        }
+    if delete_archive {
+        let removed = mmf_core::pack::remove_archive_files(&archive)?;
+        println!("Removed {removed} archive file(s).");
     }
     Ok(())
 }

@@ -65,6 +65,7 @@ minihoard pack DIR --format zip           # ...as a broadly-supported .zip
 minihoard pack DIR --split 4G             # ...split into 4 GB volumes (tar.zst)
 minihoard unpack FILE.zip                 # restore a .zip or .tar.zst archive
 minihoard unpack FILE.tar.zst.001         # ...or a split archive (first volume)
+minihoard unpack FILE.tar.zst --delete-archive  # ...and remove it once extracted
 minihoard whoami                          # show the logged-in account
 minihoard upgrade                         # update to the latest release
 ```
@@ -91,6 +92,16 @@ Two formats:
 
 `--level N` sets the zstd level (1–22, default 19). Compression runs
 multi-threaded across your cores.
+
+Each archive gets a `<archive>.json` **sidecar index** next to it (disable with
+`--no-sidecar`). It lists the creator, release month, and every file inside —
+categorized as `model` / `image` / `doc` / `other` — so a catalog (or you) can
+see what's in an archive, and find printable meshes or preview images, *without
+decompressing it*. This matters most for `tar.zst`, which has no random access.
+
+To restore, `minihoard unpack` handles `.zip` and `.tar.zst` (point it at the
+`.001` volume for a split set). Add `--delete-archive` to remove the archive —
+all split volumes plus the sidecar — once extraction succeeds.
 
 ## How it works
 
