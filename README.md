@@ -60,6 +60,8 @@ minihoard list --creator "one page rules" # by creator
 minihoard list --search dragon --undownloaded
 minihoard get 806054 806051               # by id: download, unpack, clean, reorganize
 minihoard get "dragon knight"             # by name: search, pick, then the same
+minihoard get --month 2026-06             # batch: this month's whole drop (asks first)
+minihoard get --creator "one page rules" --undownloaded   # batch: only what's new
 minihoard get 806054 --keep-archive       # ...but keep the original .zip
 minihoard pack ~/mmf/Creator-06-2026      # repack a folder for backup (tar.zst)
 minihoard pack DIR --format zip           # ...as a broadly-supported .zip
@@ -78,6 +80,11 @@ unpacked into `<unpack_dir>/{creator}-{MM-YYYY}/{release}/`, macOS artifacts
 (unless `--keep-archive`). A name that matches several items lets you pick which
 to fetch. (Searching by name needs the session cookie; ids don't.) `list` marks
 items already downloaded; downloads are tracked in a local manifest.
+
+For the monthly drop, batch a whole set with the same filters `list` uses —
+`--month`, `--creator`, `--search`, `--undownloaded`. `get` previews the matches
+and asks before downloading (use `-y` to skip the prompt). For example,
+`minihoard get --month 2026-06 --undownloaded` grabs everything new this month.
 
 ### Packing for backup
 

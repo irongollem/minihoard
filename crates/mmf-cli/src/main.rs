@@ -64,6 +64,21 @@ enum Command {
         /// Keep the original .zip after unpacking (default: delete it).
         #[arg(long)]
         keep_archive: bool,
+        /// Batch: every release from this month, e.g. 2026-06 (asks first).
+        #[arg(long)]
+        month: Option<String>,
+        /// Batch: every release from this creator (asks first).
+        #[arg(long)]
+        creator: Option<String>,
+        /// Batch: every release whose name/tags match this text (asks first).
+        #[arg(long)]
+        search: Option<String>,
+        /// Batch: restrict the above filters to items not yet downloaded.
+        #[arg(long)]
+        undownloaded: bool,
+        /// Skip the confirmation prompt for batch (filter) downloads.
+        #[arg(short = 'y', long)]
+        yes: bool,
     },
     /// Repack release folder(s) into archives for off-site backup.
     Pack {
@@ -128,7 +143,28 @@ async fn main() -> Result<()> {
             undownloaded,
             limit,
         } => list(month, creator, search, undownloaded, limit).await,
-        Command::Download { targets, keep_archive } => download(targets, keep_archive).await,
+        Command::Download {
+            targets,
+            keep_archive,
+            month,
+            creator,
+            search,
+            undownloaded,
+            yes,
+        } => {
+            download(
+                targets,
+                keep_archive,
+                DownloadFilters {
+                    month,
+                    creator,
+                    search,
+                    undownloaded,
+                    yes,
+                },
+            )
+            .await
+        }
         Command::Pack {
             paths,
             format,
@@ -389,9 +425,49 @@ async fn list(
     }
 
     // Apply filters.
-    let month_norm = month.as_ref().map(|m| m.replace('-', ""));
-    let creator_lc = creator.as_ref().map(|c| c.to_lowercase());
-    let search_lc = search.as_ref().map(|s| s.to_lowercase());
+    filter_entries(
+        &mut entries,
+        month.as_deref(),
+        creator.as_deref(),
+        search.as_deref(),
+        undownloaded,
+        &manifest,
+    );
+
+    entries.sort_by(|a, b| b.library_added_at.cmp(&a.library_added_at));
+    let shown = entries.len().min(limit);
+    println!("{} match{} (showing {shown}):", entries.len(), if entries.len() == 1 { "" } else { "es" });
+    for e in entries.iter().take(limit) {
+        let mark = if manifest.contains(e.original_id) { "✓" } else { " " };
+        let added = e
+            .library_added_at
+            .as_deref()
+            .and_then(|s| s.split('T').next())
+            .unwrap_or("?");
+        let creator = e.creator_name.as_deref().unwrap_or("?");
+        let mlabel = e.month_label().unwrap_or_default();
+        println!(
+            "  [{mark}] {:>8}  {added}  [{mlabel:>7}]  {}  — {}",
+            e.original_id, e.name, creator
+        );
+    }
+    println!("\nDownload with:  minihoard download <id> [<id> ...]");
+    Ok(())
+}
+
+/// Retain only library entries matching the given filters (shared by `list`
+/// and the filter-batch path of `get`).
+fn filter_entries(
+    entries: &mut Vec<mmf_core::library::LibraryEntry>,
+    month: Option<&str>,
+    creator: Option<&str>,
+    search: Option<&str>,
+    undownloaded: bool,
+    manifest: &mmf_core::manifest::Manifest,
+) {
+    let month_norm = month.map(|m| m.replace('-', ""));
+    let creator_lc = creator.map(|c| c.to_lowercase());
+    let search_lc = search.map(|s| s.to_lowercase());
     entries.retain(|e| {
         if let Some(m) = &month_norm {
             if e.yearmonth().as_deref() != Some(m.as_str()) {
@@ -420,26 +496,6 @@ async fn list(
         }
         true
     });
-
-    entries.sort_by(|a, b| b.library_added_at.cmp(&a.library_added_at));
-    let shown = entries.len().min(limit);
-    println!("{} match{} (showing {shown}):", entries.len(), if entries.len() == 1 { "" } else { "es" });
-    for e in entries.iter().take(limit) {
-        let mark = if manifest.contains(e.original_id) { "✓" } else { " " };
-        let added = e
-            .library_added_at
-            .as_deref()
-            .and_then(|s| s.split('T').next())
-            .unwrap_or("?");
-        let creator = e.creator_name.as_deref().unwrap_or("?");
-        let mlabel = e.month_label().unwrap_or_default();
-        println!(
-            "  [{mark}] {:>8}  {added}  [{mlabel:>7}]  {}  — {}",
-            e.original_id, e.name, creator
-        );
-    }
-    println!("\nDownload with:  minihoard download <id> [<id> ...]");
-    Ok(())
 }
 
 /// Turn a mix of numeric ids and search terms into a deduped list of object
@@ -534,11 +590,31 @@ fn pick_matches(term: &str, matches: &[&mmf_core::library::LibraryEntry]) -> Res
     Ok(out)
 }
 
-async fn download(targets: Vec<String>, keep_archive: bool) -> Result<()> {
-    use indicatif::{ProgressBar, ProgressStyle};
+/// Batch filters for `get` — download a whole matching set instead of naming
+/// each item. Any field set triggers a confirm-first filter download.
+struct DownloadFilters {
+    month: Option<String>,
+    creator: Option<String>,
+    search: Option<String>,
+    undownloaded: bool,
+    yes: bool,
+}
 
-    if targets.is_empty() {
-        anyhow::bail!("give one or more ids or names, e.g. `minihoard get 806054` or `minihoard get dragon`");
+impl DownloadFilters {
+    fn any(&self) -> bool {
+        self.month.is_some() || self.creator.is_some() || self.search.is_some() || self.undownloaded
+    }
+}
+
+async fn download(targets: Vec<String>, keep_archive: bool, filters: DownloadFilters) -> Result<()> {
+    use indicatif::{ProgressBar, ProgressStyle};
+    use std::collections::BTreeSet;
+
+    if targets.is_empty() && !filters.any() {
+        anyhow::bail!(
+            "give ids/names (e.g. `minihoard get 806054 dragon`) or a batch filter \
+             (e.g. `minihoard get --month 2026-06`)"
+        );
     }
     let config = Config::load()?;
     let token = mmf_core::auth::access_token(&config.client_id)
@@ -546,7 +622,52 @@ async fn download(targets: Vec<String>, keep_archive: bool) -> Result<()> {
         .context("get access token (run `minihoard login` first)")?;
     let cookie = mmf_core::auth::TokenStore::session_cookie()?;
 
-    let ids = resolve_targets(&targets, cookie.as_deref()).await?;
+    let mut id_set: BTreeSet<u64> = resolve_targets(&targets, cookie.as_deref())
+        .await?
+        .into_iter()
+        .collect();
+
+    // Batch: resolve a whole filter set, preview it, and confirm before pulling.
+    if filters.any() {
+        let cookie = cookie.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("batch filters need your library — run `minihoard set-cookie` first")
+        })?;
+        let mut entries = mmf_core::library::dedupe(
+            mmf_core::library::fetch_library(cookie)
+                .await
+                .context("fetch library")?,
+        );
+        let manifest = mmf_core::manifest::Manifest::load(&Config::default_data_dir()?)?;
+        filter_entries(
+            &mut entries,
+            filters.month.as_deref(),
+            filters.creator.as_deref(),
+            filters.search.as_deref(),
+            filters.undownloaded,
+            &manifest,
+        );
+        entries.sort_by(|a, b| b.library_added_at.cmp(&a.library_added_at));
+
+        if entries.is_empty() {
+            anyhow::bail!("no items match that filter");
+        }
+        println!("{} item(s) match this batch:", entries.len());
+        for e in entries.iter().take(40) {
+            let creator = e.creator_name.as_deref().unwrap_or("?");
+            let mlabel = e.month_label().unwrap_or_default();
+            println!("  {:>8}  [{mlabel:>7}]  {} — {}", e.original_id, e.name, creator);
+        }
+        if entries.len() > 40 {
+            println!("  … and {} more", entries.len() - 40);
+        }
+        if !filters.yes && !confirm(&format!("Download all {}?", entries.len()))? {
+            println!("Cancelled.");
+            return Ok(());
+        }
+        id_set.extend(entries.iter().map(|e| e.original_id));
+    }
+
+    let ids: Vec<u64> = id_set.into_iter().collect();
     if ids.is_empty() {
         anyhow::bail!("nothing matched — try `minihoard list --search <term>` to find ids");
     }
@@ -868,6 +989,16 @@ fn prompt(label: &str, default: Option<String>) -> Result<String> {
         }
         println!("  (required)");
     }
+}
+
+/// Yes/no prompt, defaulting to No (blank or anything but y/yes is false).
+fn confirm(question: &str) -> Result<bool> {
+    print!("{question} [y/N]: ");
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let a = input.trim().to_ascii_lowercase();
+    Ok(a == "y" || a == "yes")
 }
 
 /// Prompt with no default; empty input yields `None`.
