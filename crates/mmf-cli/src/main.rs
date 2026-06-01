@@ -35,8 +35,24 @@ enum Command {
         #[arg(long)]
         object: Option<u64>,
     },
-    /// List the releases available in your library.
-    List,
+    /// List the releases available in your library (filterable, for selection).
+    List {
+        /// Filter by release month, e.g. 2026-06 or 202606.
+        #[arg(long)]
+        month: Option<String>,
+        /// Filter by creator name (case-insensitive substring).
+        #[arg(long)]
+        creator: Option<String>,
+        /// Filter by object name/tag text (case-insensitive substring).
+        #[arg(long)]
+        search: Option<String>,
+        /// Only show items not yet downloaded.
+        #[arg(long)]
+        undownloaded: bool,
+        /// Show at most N items (default 60).
+        #[arg(long, default_value_t = 60)]
+        limit: usize,
+    },
     /// Download one or more releases by id.
     Download {
         /// Object ids to download. Omit to download everything new.
@@ -69,7 +85,13 @@ async fn main() -> Result<()> {
         Command::Whoami => whoami().await,
         Command::SetCookie => set_cookie(),
         Command::Explore { object } => explore(object).await,
-        Command::List => list().await,
+        Command::List {
+            month,
+            creator,
+            search,
+            undownloaded,
+            limit,
+        } => list(month, creator, search, undownloaded, limit).await,
         Command::Download { ids } => download(ids).await,
         Command::Unpack { archive } => unpack(archive),
         Command::Sync => sync().await,
@@ -274,7 +296,13 @@ fn preview(v: &serde_json::Value) -> String {
     serde_json::to_string_pretty(&clone).unwrap_or_else(|_| v.to_string())
 }
 
-async fn list() -> Result<()> {
+async fn list(
+    month: Option<String>,
+    creator: Option<String>,
+    search: Option<String>,
+    undownloaded: bool,
+    limit: usize,
+) -> Result<()> {
     use std::collections::BTreeMap;
 
     let _config = Config::load()?;
@@ -284,43 +312,84 @@ async fn list() -> Result<()> {
     let raw = mmf_core::library::fetch_library(&cookie)
         .await
         .context("fetch library (objectPreviews)")?;
-    let total_raw = raw.len();
     let mut entries = mmf_core::library::dedupe(raw);
-    println!("Library: {} unique objects ({total_raw} raw entries)\n", entries.len());
+    let manifest = mmf_core::manifest::Manifest::load(&Config::default_data_dir()?)?;
 
-    // Per-month counts (newest first).
-    let mut by_month: BTreeMap<String, usize> = BTreeMap::new();
-    for e in &entries {
-        *by_month
-            .entry(e.yearmonth().unwrap_or_else(|| "unknown".into()))
-            .or_default() += 1;
-    }
-    println!("By release month:");
-    for (ym, n) in by_month.iter().rev().take(18) {
-        let label = if ym.len() == 6 {
-            format!("{}-{}", &ym[4..6], &ym[0..4])
-        } else {
-            ym.clone()
-        };
-        println!("  {label:>9}  {n:>4}");
+    let any_filter =
+        month.is_some() || creator.is_some() || search.is_some() || undownloaded;
+
+    // No filters → show the per-month overview to help the user choose.
+    if !any_filter {
+        let mut by_month: BTreeMap<String, usize> = BTreeMap::new();
+        for e in &entries {
+            *by_month
+                .entry(e.yearmonth().unwrap_or_else(|| "unknown".into()))
+                .or_default() += 1;
+        }
+        println!("Library: {} unique objects\n", entries.len());
+        println!("By release month (use --month to filter):");
+        for (ym, n) in by_month.iter().rev().take(20) {
+            let label = if ym.len() == 6 {
+                format!("{}-{}", &ym[4..6], &ym[0..4])
+            } else {
+                ym.clone()
+            };
+            println!("  {label:>9}  {n:>4}");
+        }
+        println!("\nShowing newest {limit}. Narrow with --month / --creator / --search / --undownloaded.\n");
     }
 
-    // Newest 25 by libraryAddedAt.
+    // Apply filters.
+    let month_norm = month.as_ref().map(|m| m.replace('-', ""));
+    let creator_lc = creator.as_ref().map(|c| c.to_lowercase());
+    let search_lc = search.as_ref().map(|s| s.to_lowercase());
+    entries.retain(|e| {
+        if let Some(m) = &month_norm {
+            if e.yearmonth().as_deref() != Some(m.as_str()) {
+                return false;
+            }
+        }
+        if let Some(c) = &creator_lc {
+            if !e
+                .creator_name
+                .as_deref()
+                .map(|n| n.to_lowercase().contains(c))
+                .unwrap_or(false)
+            {
+                return false;
+            }
+        }
+        if let Some(s) = &search_lc {
+            let in_name = e.name.to_lowercase().contains(s);
+            let in_tags = e.tags.iter().any(|t| t.to_lowercase().contains(s));
+            if !in_name && !in_tags {
+                return false;
+            }
+        }
+        if undownloaded && manifest.contains(e.original_id) {
+            return false;
+        }
+        true
+    });
+
     entries.sort_by(|a, b| b.library_added_at.cmp(&a.library_added_at));
-    println!("\nMost recently added:");
-    for e in entries.iter().take(25) {
+    let shown = entries.len().min(limit);
+    println!("{} match{} (showing {shown}):", entries.len(), if entries.len() == 1 { "" } else { "es" });
+    for e in entries.iter().take(limit) {
+        let mark = if manifest.contains(e.original_id) { "✓" } else { " " };
         let added = e
             .library_added_at
             .as_deref()
-            .map(|s| s.split('T').next().unwrap_or(s))
+            .and_then(|s| s.split('T').next())
             .unwrap_or("?");
         let creator = e.creator_name.as_deref().unwrap_or("?");
-        let month = e.month_label().unwrap_or_default();
+        let mlabel = e.month_label().unwrap_or_default();
         println!(
-            "  {added}  {:>8}  [{month:>7}]  {}  — {}",
+            "  [{mark}] {:>8}  {added}  [{mlabel:>7}]  {}  — {}",
             e.original_id, e.name, creator
         );
     }
+    println!("\nDownload with:  minihoard download <id> [<id> ...]");
     Ok(())
 }
 
@@ -335,13 +404,15 @@ async fn download(ids: Vec<u64>) -> Result<()> {
         .await
         .context("get access token (run `minihoard login` first)")?;
     let client = mmf_core::api::Client::with_bearer(token.clone());
+    let data_dir = Config::default_data_dir()?;
+    let mut manifest = mmf_core::manifest::Manifest::load(&data_dir)?;
 
     for id in ids {
         let object = client
             .get(&format!("/objects/{id}"))
             .await
             .with_context(|| format!("fetch object {id}"))?;
-        let name = object["name"].as_str().unwrap_or("object");
+        let name = object["name"].as_str().unwrap_or("object").to_string();
         let files = object["files"]["items"].as_array().cloned().unwrap_or_default();
 
         if files.is_empty() {
@@ -350,14 +421,15 @@ async fn download(ids: Vec<u64>) -> Result<()> {
         }
         println!("object {id}: {name} — {} file(s)", files.len());
         let dest_dir = config.download_dir.join(id.to_string());
+        let mut written: Vec<String> = Vec::new();
 
         for file in files {
             let Some(url) = file["download_url"].as_str() else {
                 println!("  skipping a file with no download_url (not owned?)");
                 continue;
             };
-            let filename = file["filename"].as_str().unwrap_or("download.bin");
-            let dest = dest_dir.join(filename);
+            let filename = file["filename"].as_str().unwrap_or("download.bin").to_string();
+            let dest = dest_dir.join(&filename);
 
             let pb = ProgressBar::new(0);
             pb.set_style(
@@ -367,7 +439,7 @@ async fn download(ids: Vec<u64>) -> Result<()> {
                 .unwrap()
                 .progress_chars("=>-"),
             );
-            pb.set_message(filename.to_string());
+            pb.set_message(filename.clone());
 
             let report = mmf_core::download::download_to(url, &dest, &token, |done, total| {
                 if let Some(t) = total {
@@ -383,6 +455,20 @@ async fn download(ids: Vec<u64>) -> Result<()> {
                 report.bytes / 1_048_576,
                 if report.resumed { ", resumed" } else { "" }
             ));
+
+            // Auto-unpack zip archives into the unpack directory.
+            if config.defaults.unpack && mmf_core::unpack::is_archive(&dest) {
+                match mmf_core::unpack::unpack_zip(&dest, &config.unpack_dir) {
+                    Ok(r) => println!("    unpacked {} files → {}", r.files_written, r.dest.display()),
+                    Err(e) => println!("    unpack failed: {e}"),
+                }
+            }
+            written.push(filename);
+        }
+
+        if !written.is_empty() {
+            manifest.record(id, &name, written, now_unix());
+            manifest.save(&data_dir)?;
         }
     }
     println!("Done. Files in {}", config.download_dir.display());
@@ -448,6 +534,13 @@ fn prompt_optional(label: &str) -> Result<Option<String>> {
 fn prompt_path(label: &str, default: PathBuf) -> Result<PathBuf> {
     let s = prompt(label, Some(default.display().to_string()))?;
     Ok(PathBuf::from(shellexpand_tilde(&s)))
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Minimal `~` expansion so the wizard accepts `~/foo` paths.
