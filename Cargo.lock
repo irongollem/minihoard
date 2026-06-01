@@ -1284,7 +1284,7 @@ dependencies = [
 
 [[package]]
 name = "mmf-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -1300,7 +1300,7 @@ dependencies = [
 
 [[package]]
 name = "mmf-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "directories",
  "futures-util",
@@ -1325,7 +1325,7 @@ dependencies = [
 
 [[package]]
 name = "mmf-mcp"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "mmf-core",
