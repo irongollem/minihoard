@@ -22,8 +22,12 @@ pub const TOKEN_URL: &str = "https://auth.myminifactory.com/v1/oauth/tokens";
 const KEYRING_SERVICE: &str = "nl.crocode.minihoard";
 const KEYRING_USER: &str = "credentials";
 
+/// Process-wide cache so we read the keychain at most once per run (the MCP
+/// server is long-lived, so this collapses many prompts into none).
+static CREDS_CACHE: std::sync::Mutex<Option<Credentials>> = std::sync::Mutex::new(None);
+
 /// Everything secret, stored as one keychain item.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct Credentials {
     /// Confidential-client secret (from the MMF app's API key).
     client_secret: Option<String>,
@@ -64,16 +68,23 @@ impl TokenStore {
     }
 
     fn load() -> Result<Credentials> {
-        match Self::entry()?.get_password() {
-            Ok(json) => Ok(serde_json::from_str(&json).unwrap_or_default()),
-            Err(keyring::Error::NoEntry) => Ok(Credentials::default()),
-            Err(e) => Err(e.into()),
+        // Return the cached copy if we've already read the keychain this run.
+        if let Some(c) = CREDS_CACHE.lock().unwrap().as_ref() {
+            return Ok(c.clone());
         }
+        let creds = match Self::entry()?.get_password() {
+            Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
+            Err(keyring::Error::NoEntry) => Credentials::default(),
+            Err(e) => return Err(e.into()),
+        };
+        *CREDS_CACHE.lock().unwrap() = Some(creds.clone());
+        Ok(creds)
     }
 
     fn save(creds: &Credentials) -> Result<()> {
         let json = serde_json::to_string(creds)?;
         Self::entry()?.set_password(&json)?;
+        *CREDS_CACHE.lock().unwrap() = Some(creds.clone());
         Ok(())
     }
 
