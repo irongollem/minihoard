@@ -1,0 +1,64 @@
+name: release
+
+# Builds standalone binaries for Windows and macOS. Triggered by pushing a
+# version tag (e.g. v0.1.0), or manually via the Actions tab. On a tag it also
+# attaches the binaries to a GitHub Release so they can be downloaded directly
+# (no toolchain needed on the target machine).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: ".exe"
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            ext: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # BoringSSL (via wreq) needs NASM to assemble on Windows x86_64.
+      - name: Install NASM (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Stage binaries
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/minihoard${{ matrix.ext }}" \
+             "dist/minihoard-${{ matrix.target }}${{ matrix.ext }}"
+          cp "target/${{ matrix.target }}/release/minihoard-mcp${{ matrix.ext }}" \
+             "dist/minihoard-mcp-${{ matrix.target }}${{ matrix.ext }}"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: minihoard-${{ matrix.target }}
+          path: dist/*
+
+      - name: Attach to release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
