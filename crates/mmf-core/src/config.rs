@@ -68,6 +68,12 @@ impl Config {
         Ok(dirs.config_dir().join("config.toml"))
     }
 
+    /// Path to the secrets file (`<config_dir>/credentials.json`, mode 0600).
+    pub fn credentials_path() -> Result<PathBuf> {
+        let dirs = project_dirs()?;
+        Ok(dirs.config_dir().join("credentials.json"))
+    }
+
     /// Default base directory for downloads/unpacks (`~/.../minihoard/data`).
     pub fn default_data_dir() -> Result<PathBuf> {
         let dirs = project_dirs()?;

@@ -63,29 +63,52 @@ struct TokenResponse {
 pub struct TokenStore;
 
 impl TokenStore {
-    fn entry() -> Result<keyring::Entry> {
-        Ok(keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)?)
-    }
-
     fn load() -> Result<Credentials> {
-        // Return the cached copy if we've already read the keychain this run.
+        // Return the cached copy if we've already loaded this run.
         if let Some(c) = CREDS_CACHE.lock().unwrap().as_ref() {
             return Ok(c.clone());
         }
-        let creds = match Self::entry()?.get_password() {
-            Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
-            Err(keyring::Error::NoEntry) => Credentials::default(),
-            Err(e) => return Err(e.into()),
+        let path = crate::config::Config::credentials_path()?;
+        let creds = if path.exists() {
+            serde_json::from_str(&std::fs::read_to_string(&path)?).unwrap_or_default()
+        } else {
+            // First run on the file store: migrate any existing keychain item
+            // (one last keychain read), then persist to the file so we never
+            // touch the keychain again.
+            let migrated = Self::load_legacy_keychain().unwrap_or_default();
+            let _ = Self::write_file(&migrated);
+            migrated
         };
         *CREDS_CACHE.lock().unwrap() = Some(creds.clone());
         Ok(creds)
     }
 
     fn save(creds: &Credentials) -> Result<()> {
-        let json = serde_json::to_string(creds)?;
-        Self::entry()?.set_password(&json)?;
+        Self::write_file(creds)?;
         *CREDS_CACHE.lock().unwrap() = Some(creds.clone());
         Ok(())
+    }
+
+    /// Write credentials to the 0600 secrets file.
+    fn write_file(creds: &Credentials) -> Result<()> {
+        let path = crate::config::Config::credentials_path()?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, serde_json::to_string_pretty(creds)?)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(())
+    }
+
+    /// One-time read of the legacy keychain item (for migration only).
+    fn load_legacy_keychain() -> Option<Credentials> {
+        let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).ok()?;
+        let json = entry.get_password().ok()?;
+        serde_json::from_str(&json).ok()
     }
 
     pub fn save_client_secret(secret: &str) -> Result<()> {
