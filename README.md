@@ -74,6 +74,8 @@ minihoard get --month 2026-06             # batch: this month's whole drop (asks
 minihoard get --month 2026-06 -j 6        # ...downloading 6 in parallel
 minihoard get --creator "one page rules" --undownloaded   # batch: only what's new
 minihoard get 806054 --keep-archive       # ...but keep the original .zip
+minihoard get --month 2026-06 --pack --split 4G --name "Dungeon Classics - 2026-06"
+                                          # download, then repack the month into named 4 GB chunks
 minihoard pack ~/mmf/Creator-06-2026      # repack a folder for backup (tar.zst)
 minihoard pack DIR --format zip           # ...as a broadly-supported .zip
 minihoard pack DIR --split 4G             # ...split into 4 GB volumes (tar.zst)
@@ -147,10 +149,15 @@ all split volumes plus the sidecar — once extraction succeeds.
   (default 5, like a browser's per-host connections; tune with `-j` or the
   `download_concurrency` config key).
 
+`get --pack` chains the repack onto a download: after the releases land, each
+touched month group is packed into a tar.zst archive. `--split`/`--name` (which
+both imply `--pack`) set the chunk size and the archive's filename, so a whole
+monthly drop becomes one named, chunked backup in a single command.
+
 ## Roadmap
 
-- `download --pack` to repack each release right after downloading.
-- Per-source filters/grouping (Tribes / shared / Kickstarter / store).
+- Per-source filters/grouping (Tribes / shared / Kickstarter / store) — the
+  library's `source` field is already captured, just not yet filterable.
 
 ## License
 

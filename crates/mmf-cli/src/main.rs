@@ -85,6 +85,17 @@ enum Command {
         /// How many objects to download in parallel (default: from config, ~5).
         #[arg(short = 'j', long)]
         jobs: Option<usize>,
+        /// After downloading, repack each touched month group into a tar.zst
+        /// archive for backup. Implied by --split / --name.
+        #[arg(long)]
+        pack: bool,
+        /// Split the repack into fixed-size volumes, e.g. 4G (implies --pack).
+        #[arg(long)]
+        split: Option<String>,
+        /// Archive base filename for the repack, verbatim (implies --pack;
+        /// only valid when the batch touches a single month group).
+        #[arg(long)]
+        name: Option<String>,
     },
     /// Repack release folder(s) into archives for off-site backup.
     Pack {
@@ -169,6 +180,9 @@ async fn main() -> Result<()> {
             undownloaded,
             yes,
             jobs,
+            pack,
+            split,
+            name,
         } => {
             download(
                 targets,
@@ -181,6 +195,7 @@ async fn main() -> Result<()> {
                     undownloaded,
                     yes,
                 },
+                PackAfter { pack, split, name },
             )
             .await
         }
@@ -647,11 +662,25 @@ impl DownloadFilters {
     }
 }
 
+/// Optional repack step run after a download completes.
+struct PackAfter {
+    pack: bool,
+    split: Option<String>,
+    name: Option<String>,
+}
+
+impl PackAfter {
+    fn enabled(&self) -> bool {
+        self.pack || self.split.is_some() || self.name.is_some()
+    }
+}
+
 async fn download(
     targets: Vec<String>,
     keep_archive: bool,
     jobs: Option<usize>,
     filters: DownloadFilters,
+    pack_after: PackAfter,
 ) -> Result<()> {
     use indicatif::{ProgressBar, ProgressStyle};
     use std::collections::BTreeSet;
@@ -768,11 +797,86 @@ async fn download(
 
     if outcomes.is_empty() {
         println!("Nothing downloaded (do you own the given ids?).");
-    } else {
+        return Ok(());
+    }
+    println!(
+        "\nDone: {} release(s) under {}",
+        outcomes.len(),
+        config.unpack_dir.display()
+    );
+
+    if pack_after.enabled() {
+        repack_groups(&config, &outcomes, &pack_after)?;
+    }
+    Ok(())
+}
+
+/// Pack each distinct month-group folder touched by a download into a tar.zst
+/// archive (for the `get --pack` flow).
+fn repack_groups(
+    config: &Config,
+    outcomes: &[mmf_core::pipeline::Outcome],
+    pack_after: &PackAfter,
+) -> Result<()> {
+    use indicatif::{ProgressBar, ProgressStyle};
+    use mmf_core::pack::{pack_dir, parse_size, PackFormat, PackOptions};
+    use std::collections::BTreeSet;
+
+    let split_bytes = match &pack_after.split {
+        Some(s) => Some(parse_size(s)?),
+        None => None,
+    };
+    // The group folders are the parents of each release dir (one level under the
+    // unpack dir). Dedupe so a multi-release group is packed once.
+    let groups: BTreeSet<PathBuf> = outcomes
+        .iter()
+        .filter_map(|o| o.dir.parent().map(|p| p.to_path_buf()))
+        .filter(|p| p != &config.unpack_dir)
+        .collect();
+    if groups.is_empty() {
+        return Ok(());
+    }
+    if pack_after.name.is_some() && groups.len() > 1 {
+        anyhow::bail!(
+            "--name only works when the download is a single month group ({} were touched)",
+            groups.len()
+        );
+    }
+
+    println!("\nRepacking {} group(s):", groups.len());
+    for group in &groups {
+        let out_dir = group.parent().unwrap_or(&config.unpack_dir);
+        let opts = PackOptions {
+            format: PackFormat::TarZst,
+            level: 19,
+            split_bytes,
+            write_sidecar: true,
+        };
+        let label = group.file_name().and_then(|s| s.to_str()).unwrap_or("group").to_string();
+        let pb = ProgressBar::new(0);
+        pb.set_style(
+            ProgressStyle::with_template("  {spinner} packing {msg} • {bytes}")
+                .unwrap(),
+        );
+        pb.set_message(label.clone());
+        let report = pack_dir(group, out_dir, &opts, pack_after.name.as_deref(), |done| {
+            pb.set_position(done);
+        })
+        .with_context(|| format!("pack {}", group.display()))?;
+        pb.finish_and_clear();
+
+        let parts = if report.outputs.len() > 1 {
+            format!(", {} volumes", report.outputs.len())
+        } else {
+            String::new()
+        };
         println!(
-            "\nDone: {} release(s) under {}",
-            outcomes.len(),
-            config.unpack_dir.display()
+            "  📦 {label} ({} files, {} MB → {} MB{}) → {}",
+            report.file_count,
+            report.input_bytes / 1_048_576,
+            report.output_bytes / 1_048_576,
+            parts,
+            report.outputs[0].display()
         );
     }
     Ok(())
