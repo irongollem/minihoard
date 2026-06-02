@@ -17,6 +17,7 @@ pub mod api;
 pub mod auth;
 pub mod clean;
 pub mod config;
+pub mod cookies;
 pub mod download;
 pub mod error;
 pub mod library;

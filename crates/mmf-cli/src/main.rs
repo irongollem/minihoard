@@ -34,6 +34,14 @@ enum Command {
     /// Store the MMF website session cookie (paste the Cookie header from a
     /// logged-in browser) — needed for full-library listing.
     SetCookie,
+    /// Import the MMF session cookie automatically from a logged-in browser
+    /// (no manual paste). Reads the browser's own cookie store.
+    SyncCookie {
+        /// Which browser to read from (chrome/firefox/edge/brave/safari/…).
+        /// Omit to auto-detect across installed browsers.
+        #[arg(long)]
+        browser: Option<String>,
+    },
     /// Probe authenticated endpoints to discover your library (M0 spike).
     Explore {
         /// Optional object id you OWN, to confirm files + download_url appear.
@@ -169,6 +177,7 @@ async fn main() -> Result<()> {
         Command::Logout => logout(),
         Command::Whoami => whoami().await,
         Command::SetCookie => set_cookie(),
+        Command::SyncCookie { browser } => sync_cookie(browser).await,
         Command::Explore { object } => explore(object).await,
         Command::List {
             month,
@@ -340,7 +349,29 @@ fn set_cookie() -> Result<()> {
         anyhow::bail!("no cookie entered");
     }
     mmf_core::auth::TokenStore::save_session_cookie(cookie)?;
-    println!("Saved session cookie to the keychain.");
+    println!("Saved session cookie.");
+    Ok(())
+}
+
+/// Import the session cookie automatically from a logged-in browser.
+async fn sync_cookie(browser: Option<String>) -> Result<()> {
+    let header = mmf_core::cookies::import_from_browser(browser.as_deref())
+        .context("import cookie from browser")?;
+    mmf_core::auth::TokenStore::save_session_cookie(&header)?;
+
+    // Verify it actually works against the library endpoint.
+    match mmf_core::library::fetch_library(&header).await {
+        Ok(list) => println!(
+            "✓ Imported session cookie{}; library readable ({} entries).",
+            browser.map(|b| format!(" from {b}")).unwrap_or_default(),
+            list.len()
+        ),
+        Err(e) => println!(
+            "Imported a cookie but the library fetch failed: {e}\n\
+             Make sure you're logged in to MyMiniFactory in that browser, then retry \
+             (or use `minihoard set-cookie` to paste manually)."
+        ),
+    }
     Ok(())
 }
 

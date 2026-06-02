@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/mmf-core", "crates/mmf-cli", "crates/mmf-mcp"]
 
 [workspace.package]
-version = "0.2.9"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 authors = ["Jeffrey Ernst"]
@@ -40,6 +40,8 @@ tiny_http = "0.12"
 url = "2"
 open = "5"
 uuid = { version = "1", features = ["v4"] }
+# read website session cookies from a logged-in browser (cookie bootstrap)
+rookie = "0.5"
 
 # unpack + integrity
 zip = "2"

@@ -53,12 +53,18 @@ otherwise trip the client's tool-call timeout on a big batch.
 ```sh
 minihoard configure    # API client id (+ secret) and your library folder
 minihoard login        # browser OAuth — opens a tab, stores a refresh token
-minihoard set-cookie   # one-time: paste your MMF session cookie (see below)
+minihoard sync-cookie  # import your MMF session cookie from your browser
 ```
 
 The session cookie is needed only for **library listing** (downloads use OAuth).
-Run `minihoard set-cookie` and follow the prompt — it tells you exactly which
-header to copy from your browser's DevTools. Re-run when the cookie expires.
+The easy way is `minihoard sync-cookie`, which reads it straight from a browser
+you're already logged into MyMiniFactory with (like `yt-dlp --cookies-from-browser`)
+— no manual copying. It auto-detects across installed browsers, or pick one with
+`--browser firefox`. On macOS, Chrome's cookie store is Keychain-encrypted, so
+reading it prompts once (Firefox doesn't). If you'd rather paste it yourself,
+`minihoard set-cookie` walks you through copying the header from DevTools. Re-run
+either when the cookie expires (rarely — the `REMEMBERME` cookie is long-lived).
+
 Secrets are stored in a `0600` file in the app config dir, never a system
 keychain, so headless/automated use never prompts.
 
