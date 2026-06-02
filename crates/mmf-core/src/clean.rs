@@ -123,9 +123,78 @@ pub fn flatten_single_dir(dir: &Path) -> std::io::Result<PathBuf> {
     Ok(current)
 }
 
+/// Tidy one release folder in place: strip macOS artifacts, then collapse any
+/// redundant single-folder nesting. Returns the folder's final path (it may have
+/// been renamed by the flatten).
+pub fn tidy_dir(dir: &Path) -> std::io::Result<PathBuf> {
+    strip_apple_artifacts(dir);
+    flatten_single_dir(dir)
+}
+
+/// True if a folder name looks like a `{creator}-{MM-YYYY}` (or `{creator}-undated`)
+/// month group produced by the download pipeline. Used to avoid mistaking a group
+/// for a release folder when tidying a whole library.
+pub fn looks_like_month_group(name: &str) -> bool {
+    if let Some(stripped) = name.strip_suffix("-undated") {
+        return !stripped.is_empty();
+    }
+    let b = name.as_bytes();
+    let n = b.len();
+    // Trailing "-MM-YYYY" (8 chars), with a non-empty creator before it.
+    n >= 9
+        && b[n - 8] == b'-'
+        && b[n - 7].is_ascii_digit()
+        && b[n - 6].is_ascii_digit()
+        && b[n - 5] == b'-'
+        && b[n - 4].is_ascii_digit()
+        && b[n - 3].is_ascii_digit()
+        && b[n - 2].is_ascii_digit()
+        && b[n - 1].is_ascii_digit()
+}
+
+/// Enumerate the release folders under a library root: the children of each
+/// `{creator}-{MM-YYYY}` month group, plus any release folder sitting directly
+/// under the root. Month-group folders themselves are never returned (so tidying
+/// never collapses the group/month structure).
+pub fn library_release_dirs(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return out;
+    };
+    for e in entries.filter_map(|e| e.ok()) {
+        if !e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = e.file_name().to_string_lossy().to_string();
+        if looks_like_month_group(&name) {
+            // A group → its children are the releases.
+            if let Ok(subs) = std::fs::read_dir(e.path()) {
+                for s in subs.filter_map(|s| s.ok()) {
+                    if s.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        out.push(s.path());
+                    }
+                }
+            }
+        } else {
+            // A release folder sitting directly under the root.
+            out.push(e.path());
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognizes_month_groups() {
+        assert!(looks_like_month_group("dungeon_classics-05-2026"));
+        assert!(looks_like_month_group("one_page_rules-undated"));
+        assert!(!looks_like_month_group("Behir"));
+        assert!(!looks_like_month_group("Knellkins"));
+        assert!(!looks_like_month_group("-05-2026")); // empty creator
+    }
 
     #[test]
     fn cleans_names() {

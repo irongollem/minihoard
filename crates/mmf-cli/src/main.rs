@@ -104,6 +104,12 @@ enum Command {
         #[arg(long)]
         no_sidecar: bool,
     },
+    /// Tidy existing release folders: strip macOS junk and collapse redundant
+    /// single-folder nesting. With no paths, tidies your whole library.
+    Tidy {
+        /// Folders to tidy (default: every release under the unpack dir).
+        paths: Vec<PathBuf>,
+    },
     /// Unpack a downloaded archive (.zip or .tar.zst) into the unpack directory.
     Unpack {
         /// Path to a `.zip` or `.tar.zst` archive (a `.001` volume for splits).
@@ -177,6 +183,7 @@ async fn main() -> Result<()> {
             out,
             no_sidecar,
         } => pack(paths, format, level, split, out, no_sidecar),
+        Command::Tidy { paths } => tidy(paths),
         Command::Unpack {
             archive,
             delete_archive,
@@ -814,6 +821,40 @@ fn pack(
             println!("  index: {}", s.display());
         }
     }
+    Ok(())
+}
+
+fn tidy(paths: Vec<PathBuf>) -> Result<()> {
+    let targets = if paths.is_empty() {
+        let config = Config::load()?;
+        let dirs = mmf_core::clean::library_release_dirs(&config.unpack_dir);
+        if dirs.is_empty() {
+            println!("Nothing to tidy under {}", config.unpack_dir.display());
+            return Ok(());
+        }
+        dirs
+    } else {
+        paths
+    };
+
+    let mut renamed = 0;
+    for t in &targets {
+        if !t.is_dir() {
+            eprintln!("skip (not a directory): {}", t.display());
+            continue;
+        }
+        let final_dir = mmf_core::clean::tidy_dir(t)
+            .with_context(|| format!("tidy {}", t.display()))?;
+        if final_dir != *t {
+            println!("✓ {} → {}", t.display(), final_dir.display());
+            renamed += 1;
+        }
+    }
+    println!(
+        "Tidied {} folder(s); {} collapsed.",
+        targets.len(),
+        renamed
+    );
     Ok(())
 }
 

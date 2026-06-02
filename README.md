@@ -74,6 +74,8 @@ minihoard get 806054 --keep-archive       # ...but keep the original .zip
 minihoard pack ~/mmf/Creator-06-2026      # repack a folder for backup (tar.zst)
 minihoard pack DIR --format zip           # ...as a broadly-supported .zip
 minihoard pack DIR --split 4G             # ...split into 4 GB volumes (tar.zst)
+minihoard tidy                            # tidy whole library (strip junk, collapse nesting)
+minihoard tidy ~/mmf/some-release         # ...or specific folders
 minihoard unpack FILE.zip                 # restore a .zip or .tar.zst archive
 minihoard unpack FILE.tar.zst.001         # ...or a split archive (first volume)
 minihoard unpack FILE.tar.zst --delete-archive  # ...and remove it once extracted

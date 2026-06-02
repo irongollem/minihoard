@@ -193,6 +193,16 @@ fn tool_defs() -> Value {
                 },
                 "required": ["archive"]
             }
+        },
+        {
+            "name": "tidy",
+            "description": "Tidy existing release folders: strip macOS junk and collapse redundant single-folder nesting (Release/Release/files → Release/files). With no paths, tidies the whole library. Runs in the BACKGROUND — poll job_status. Never merges folders that have 2+ real children.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "paths": { "type": "array", "items": { "type": "string" }, "description": "Folders to tidy (omit to tidy every release in the library)" }
+                }
+            }
         }
     ])
 }
@@ -207,6 +217,7 @@ async fn call_tool(name: &str, args: Value) -> Result<String> {
         "config" => config_info().await,
         "pack" => pack(args).await,
         "unpack" => unpack(args).await,
+        "tidy" => tidy(args).await,
         other => anyhow::bail!("unknown tool: {other}"),
     }
 }
@@ -639,5 +650,71 @@ async fn unpack(args: Value) -> Result<String> {
 
     Ok(format!(
         "Started background unpack job #{job_id}. Poll job_status with job={job_id}."
+    ))
+}
+
+async fn tidy(args: Value) -> Result<String> {
+    let targets: Vec<std::path::PathBuf> = match args["paths"].as_array() {
+        Some(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(std::path::PathBuf::from))
+            .collect(),
+        None => {
+            let config = mmf_core::Config::load()?;
+            mmf_core::clean::library_release_dirs(&config.unpack_dir)
+        }
+    };
+    if targets.is_empty() {
+        return Ok("Nothing to tidy.".into());
+    }
+
+    let job_id = JOB_SEQ.fetch_add(1, Ordering::Relaxed);
+    JOBS.lock().unwrap().insert(
+        job_id,
+        Job {
+            total: targets.len(),
+            phase: "tidying".into(),
+            current: "starting…".into(),
+            ..Default::default()
+        },
+    );
+
+    let count = targets.len();
+    tokio::task::spawn_blocking(move || {
+        let mut renamed = 0usize;
+        let mut summary = String::new();
+        for (i, dir) in targets.iter().enumerate() {
+            let label = dir
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("folder")
+                .to_string();
+            update_job(job_id, |j| {
+                j.done = i;
+                j.current = format!("tidying {label}");
+            });
+            if !dir.is_dir() {
+                continue;
+            }
+            match mmf_core::clean::tidy_dir(dir) {
+                Ok(final_dir) if final_dir != *dir => {
+                    renamed += 1;
+                    summary.push_str(&format!("\n✓ {} → {}", dir.display(), final_dir.display()));
+                }
+                Ok(_) => {}
+                Err(e) => summary.push_str(&format!("\n⚠ {}: {e}", dir.display())),
+            }
+        }
+        update_job(job_id, |j| {
+            j.finished = true;
+            j.done = j.total;
+            j.phase = "done".into();
+            j.current = "done".into();
+            j.summary = format!("Tidied {} folder(s); {renamed} collapsed.{summary}", j.total);
+        });
+    });
+
+    Ok(format!(
+        "Started background tidy job #{job_id} for {count} folder(s). Poll job_status with job={job_id}."
     ))
 }
