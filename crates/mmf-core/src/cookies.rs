@@ -54,7 +54,12 @@ fn read(browser: Option<&str>, domains: Option<Vec<String>>) -> Result<Vec<Cooki
         Some("edge") => rookie::edge(domains),
         Some("brave") => rookie::brave(domains),
         Some("arc") => rookie::arc(domains),
+        #[cfg(target_os = "macos")]
         Some("safari") => rookie::safari(domains),
+        #[cfg(not(target_os = "macos"))]
+        Some("safari") => {
+            return Err(Error::Auth("Safari cookies are only available on macOS".into()))
+        }
         Some("vivaldi") => rookie::vivaldi(domains),
         Some("opera") => rookie::opera(domains),
         Some(other) => {
