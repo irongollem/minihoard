@@ -235,12 +235,16 @@ fn measure(src: &Path) -> Result<(u64, usize)> {
     Ok((bytes, count))
 }
 
-/// Pack directory `src` into `out_dir/<src-name>.<ext>` (or `.001`, `.002`, …
-/// when split). `on_progress(bytes_read)` reports input bytes consumed.
+/// Pack directory `src` into `out_dir/<name>.<ext>` (or `.001`, `.002`, … when
+/// split). `name_override` sets the archive's base filename verbatim (for a
+/// strict archive naming convention); when `None`, the source folder name is
+/// used. The archive's *internal* layout always keeps the real folder name.
+/// `on_progress(bytes_read)` reports input bytes consumed.
 pub fn pack_dir(
     src: &Path,
     out_dir: &Path,
     opts: &PackOptions,
+    name_override: Option<&str>,
     on_progress: impl FnMut(u64),
 ) -> Result<PackReport> {
     if !src.is_dir() {
@@ -249,10 +253,13 @@ pub fn pack_dir(
             src.display()
         )));
     }
-    let name = src
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| Error::Unpack(format!("bad folder name: {}", src.display())))?;
+    let name = match name_override {
+        Some(n) if !n.trim().is_empty() => n.trim(),
+        _ => src
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| Error::Unpack(format!("bad folder name: {}", src.display())))?,
+    };
     std::fs::create_dir_all(out_dir)?;
 
     let (input_bytes, file_count) = measure(src)?;
@@ -720,7 +727,7 @@ mod tests {
         make_tree(&src);
         let out = tmp.join("out");
 
-        let report = pack_dir(&src, &out, &PackOptions::default(), |_| {}).unwrap();
+        let report = pack_dir(&src, &out, &PackOptions::default(), None, |_| {}).unwrap();
         assert_eq!(report.outputs.len(), 1);
         assert_eq!(report.file_count, 2);
         assert!(report.outputs[0].exists());
@@ -746,7 +753,7 @@ mod tests {
         std::fs::write(src.join("__MACOSX/ignore"), b"junk").unwrap();
         let out = tmp.join("out");
 
-        let report = pack_dir(&src, &out, &PackOptions::default(), |_| {}).unwrap();
+        let report = pack_dir(&src, &out, &PackOptions::default(), None, |_| {}).unwrap();
         // measure() and the sidecar agree, counting only the two real .stl files.
         assert_eq!(report.file_count, 2);
         let sidecar: Sidecar =
@@ -780,7 +787,7 @@ mod tests {
         std::fs::write(src.join("render.png"), vec![0u8; 100]).unwrap();
         let out = tmp.join("out");
 
-        let report = pack_dir(&src, &out, &PackOptions::default(), |_| {}).unwrap();
+        let report = pack_dir(&src, &out, &PackOptions::default(), None, |_| {}).unwrap();
         let sidecar = report.sidecar.expect("sidecar written");
         assert!(sidecar.to_str().unwrap().ends_with("DragonKnight.tar.zst.json"));
 
@@ -826,7 +833,7 @@ mod tests {
             split_bytes: Some(16384),
             write_sidecar: true,
         };
-        let report = pack_dir(&src, &out, &opts, |_| {}).unwrap();
+        let report = pack_dir(&src, &out, &opts, None, |_| {}).unwrap();
         let volumes = report.outputs.len();
         assert!(volumes > 1);
 
@@ -851,7 +858,7 @@ mod tests {
             format: PackFormat::Zip,
             ..Default::default()
         };
-        let report = pack_dir(&src, &out, &opts, |_| {}).unwrap();
+        let report = pack_dir(&src, &out, &opts, None, |_| {}).unwrap();
         assert_eq!(report.outputs.len(), 1);
         assert!(report.outputs[0].to_str().unwrap().ends_with(".zip"));
 
@@ -888,7 +895,7 @@ mod tests {
             split_bytes: Some(16384), // small volumes to force a split
             write_sidecar: true,
         };
-        let report = pack_dir(&src, &out, &opts, |_| {}).unwrap();
+        let report = pack_dir(&src, &out, &opts, None, |_| {}).unwrap();
         assert!(
             report.outputs.len() > 1,
             "expected multiple volumes, got {}",

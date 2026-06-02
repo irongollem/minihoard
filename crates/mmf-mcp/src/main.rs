@@ -177,7 +177,8 @@ fn tool_defs() -> Value {
                     "format": { "type": "string", "enum": ["tarzst", "zip"], "description": "Archive format (default tarzst)" },
                     "level": { "type": "integer", "description": "zstd level 1-22 (default 19; tar.zst only)" },
                     "split": { "type": "string", "description": "Volume size for chunked backup, e.g. 4G or 2G (tar.zst only)" },
-                    "out": { "type": "string", "description": "Output directory (default: alongside each source folder)" }
+                    "out": { "type": "string", "description": "Output directory (default: alongside each source folder)" },
+                    "name": { "type": "string", "description": "Archive base filename, verbatim (e.g. 'Dungeon Classics - 2026-04'). Single folder only; defaults to the folder name." }
                 },
                 "required": ["paths"]
             }
@@ -535,6 +536,10 @@ async fn pack(args: Value) -> Result<String> {
     if paths.is_empty() {
         anyhow::bail!("no folders given to pack");
     }
+    let name_override = args["name"].as_str().map(String::from);
+    if name_override.is_some() && paths.len() > 1 {
+        anyhow::bail!("`name` only works with a single folder (you gave {})", paths.len());
+    }
     let format = PackFormat::parse(args["format"].as_str().unwrap_or("tarzst"))?;
     let level = args["level"].as_i64().unwrap_or(19) as i32;
     let split_bytes = match args["split"].as_str() {
@@ -558,11 +563,13 @@ async fn pack(args: Value) -> Result<String> {
     tokio::task::spawn_blocking(move || {
         let mut summary = String::new();
         for (i, src) in paths.iter().enumerate() {
-            let name = src
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("archive")
-                .to_string();
+            // Archive base name: the override (single-folder only) or folder name.
+            let name = name_override.clone().unwrap_or_else(|| {
+                src.file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("archive")
+                    .to_string()
+            });
             update_job(job_id, |j| {
                 j.done = i;
                 j.object = name.clone();
@@ -578,7 +585,7 @@ async fn pack(args: Value) -> Result<String> {
                 write_sidecar: true,
             };
             let nm = name.clone();
-            match mmf_core::pack::pack_dir(src, &out_dir, &opts, |done| {
+            match mmf_core::pack::pack_dir(src, &out_dir, &opts, name_override.as_deref(), |done| {
                 update_job(job_id, |j| {
                     j.current = format!("packing {nm} — {} MB written", done / 1_048_576);
                 });

@@ -103,6 +103,10 @@ enum Command {
         /// Output directory (default: alongside each source folder).
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Archive base filename, verbatim (e.g. "Dungeon Classics - 2026-04").
+        /// Only valid with a single folder; defaults to the folder name.
+        #[arg(long)]
+        name: Option<String>,
         /// Don't write the `<archive>.json` content index.
         #[arg(long)]
         no_sidecar: bool,
@@ -186,8 +190,9 @@ async fn main() -> Result<()> {
             level,
             split,
             out,
+            name,
             no_sidecar,
-        } => pack(paths, format, level, split, out, no_sidecar),
+        } => pack(paths, format, level, split, out, name, no_sidecar),
         Command::Tidy { paths } => tidy(paths),
         Command::Unpack {
             archive,
@@ -779,6 +784,7 @@ fn pack(
     level: i32,
     split: Option<String>,
     out: Option<PathBuf>,
+    name: Option<String>,
     no_sidecar: bool,
 ) -> Result<()> {
     use indicatif::{ProgressBar, ProgressStyle};
@@ -786,6 +792,9 @@ fn pack(
 
     if paths.is_empty() {
         anyhow::bail!("give one or more folders, e.g. `minihoard pack ~/mmf/Creator-06-2026`");
+    }
+    if name.is_some() && paths.len() > 1 {
+        anyhow::bail!("--name only works with a single folder (you gave {})", paths.len());
     }
     let format = PackFormat::parse(&format)?;
     let split_bytes = match split {
@@ -819,16 +828,16 @@ fn pack(
             .to_string();
         pb.set_message(label.clone());
 
-        let report = pack_dir(src, &out_dir, &opts, |done| {
+        let report = pack_dir(src, &out_dir, &opts, name.as_deref(), |done| {
             pb.set_position(done);
         })
         .with_context(|| format!("pack {}", src.display()))?;
         pb.set_length(report.input_bytes);
         pb.finish_and_clear();
 
-        let ratio = (report.output_bytes * 100)
+        let ratio = (report.output_bytes.saturating_mul(100))
             .checked_div(report.input_bytes)
-            .map(|pct| 100 - pct)
+            .map(|pct| 100i64 - pct as i64)
             .unwrap_or(0);
         let parts = if report.outputs.len() > 1 {
             format!(", {} volumes", report.outputs.len())

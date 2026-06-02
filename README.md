@@ -75,6 +75,7 @@ minihoard get 806054 --keep-archive       # ...but keep the original .zip
 minihoard pack ~/mmf/Creator-06-2026      # repack a folder for backup (tar.zst)
 minihoard pack DIR --format zip           # ...as a broadly-supported .zip
 minihoard pack DIR --split 4G             # ...split into 4 GB volumes (tar.zst)
+minihoard pack DIR --name "Archive Name"  # ...with a custom archive filename
 minihoard tidy                            # tidy whole library (strip junk, collapse nesting)
 minihoard tidy ~/mmf/some-release         # ...or specific folders
 minihoard unpack FILE.zip                 # restore a .zip or .tar.zst archive
@@ -119,7 +120,9 @@ Two formats:
   everything). Single file only — no `--split`.
 
 `--level N` sets the zstd level (1–22, default 19). Compression runs
-multi-threaded across your cores.
+multi-threaded across your cores. `--name "…"` sets the archive's base filename
+verbatim (for a strict archive naming convention) instead of the folder name;
+the archive's internal layout still keeps the real folder name.
 
 Each archive gets a `<archive>.json` **sidecar index** next to it (disable with
 `--no-sidecar`). It lists the creator, release month, and every file inside —
