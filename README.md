@@ -1,8 +1,9 @@
 # minihoard
 
 A Rust CLI **and** MCP server to fetch your [MyMiniFactory](https://www.myminifactory.com/)
-library, unpack it, and (soon) restructure + repack it for archival and
-cataloging alongside [stl-pack](https://github.com/irongollem/stl-pack).
+library, unpack and reorganize it into tidy per-creator/month folders, and
+repack it (tar.zst or zip, splittable) for archival and cataloging alongside
+[stl-pack](https://github.com/irongollem/stl-pack).
 
 Browse and download from the terminal, or talk to an assistant (via the MCP
 server) — "show me June's Tribe releases", "download these".
@@ -39,17 +40,18 @@ That's it — it edits `claude_desktop_config.json` automatically. Restart Claud
 Desktop, then ask it to browse and download your library.
 
 The MCP exposes `status`, `config`, `list_library`, `preview_download`,
-`download_objects`, `pack`, `unpack`, and `job_status` — so you can browse,
-download, repack, and restore entirely by chat. The long-running tools
-(`download_objects`, `pack`, `unpack`) run in the **background**: they return a
-job id right away and the assistant polls `job_status` to report live progress
+`download_objects`, `pack`, `unpack`, `tidy`, and `job_status` — so you can
+browse, download, repack, restore, and tidy entirely by chat. The long-running
+tools (`download_objects`, `pack`, `unpack`, `tidy`) run in the **background**:
+they return a job id right away and the assistant polls `job_status` to report
+live progress
 ("3 of 5 done, downloading Behir…") instead of blocking silently — which would
 otherwise trip the client's tool-call timeout on a big batch.
 
 ## Setup
 
 ```sh
-minihoard configure    # API client id (+ secret) and download/unpack folders
+minihoard configure    # API client id (+ secret) and your library folder
 minihoard login        # browser OAuth — opens a tab, stores a refresh token
 minihoard set-cookie   # one-time: paste your MMF session cookie (see below)
 ```
