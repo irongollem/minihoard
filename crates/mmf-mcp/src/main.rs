@@ -118,13 +118,14 @@ fn tool_defs() -> Value {
         },
         {
             "name": "list_library",
-            "description": "List objects in the user's MyMiniFactory library. Filter by release month (YYYY-MM), creator name, or text. Marks which are already downloaded.",
+            "description": "List objects in the user's MyMiniFactory library. Filter by release month (YYYY-MM), creator name, text, or source channel (TRIBE/PURCHASE/kickstarter/etc.). Marks which are already downloaded.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "month": { "type": "string", "description": "Release month, e.g. 2026-06" },
                     "creator": { "type": "string", "description": "Creator name substring (case-insensitive)" },
                     "search": { "type": "string", "description": "Object name/tag substring (case-insensitive)" },
+                    "source": { "type": "string", "description": "Source channel substring, e.g. tribe / purchase / kickstarter" },
                     "undownloaded": { "type": "boolean", "description": "Only items not yet downloaded" },
                     "limit": { "type": "integer", "description": "Max items to return (default 50)" }
                 }
@@ -284,6 +285,7 @@ async fn list_library(args: Value) -> Result<String> {
     let month = args["month"].as_str().map(|m| m.replace('-', ""));
     let creator = args["creator"].as_str().map(|c| c.to_lowercase());
     let search = args["search"].as_str().map(|s| s.to_lowercase());
+    let source = args["source"].as_str().map(|s| s.to_lowercase());
     let undownloaded = args["undownloaded"].as_bool().unwrap_or(false);
     let limit = args["limit"].as_u64().unwrap_or(50) as usize;
 
@@ -302,6 +304,11 @@ async fn list_library(args: Value) -> Result<String> {
             if !e.name.to_lowercase().contains(s)
                 && !e.tags.iter().any(|t| t.to_lowercase().contains(s))
             {
+                return false;
+            }
+        }
+        if let Some(src) = &source {
+            if !e.source.as_deref().map(|s| s.to_lowercase().contains(src)).unwrap_or(false) {
                 return false;
             }
         }

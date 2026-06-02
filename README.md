@@ -68,6 +68,7 @@ keychain, so headless/automated use never prompts.
 minihoard list --month 2026-06            # filter by release month
 minihoard list --creator "one page rules" # by creator
 minihoard list --search dragon --undownloaded
+minihoard list --source tribe             # by source channel (tribe/purchase/kickstarter/…)
 minihoard get 806054 806051               # by id: download, unpack, clean, reorganize
 minihoard get "dragon knight"             # by name: search, pick, then the same
 minihoard get --month 2026-06             # batch: this month's whole drop (asks first)
@@ -105,9 +106,12 @@ is removed and the release folder takes the inner folder's name — so you get
 same.)
 
 For the monthly drop, batch a whole set with the same filters `list` uses —
-`--month`, `--creator`, `--search`, `--undownloaded`. `get` previews the matches
-and asks before downloading (use `-y` to skip the prompt). For example,
-`minihoard get --month 2026-06 --undownloaded` grabs everything new this month.
+`--month`, `--creator`, `--search`, `--source`, `--undownloaded`. `get` previews
+the matches and asks before downloading (use `-y` to skip the prompt). For
+example, `minihoard get --month 2026-06 --undownloaded` grabs everything new
+this month, and `minihoard get --source tribe --month 2026-06` grabs just your
+Tribe-tier releases. `list` with no filters shows breakdowns by month and by
+source to help you choose.
 
 ### Packing for backup
 
@@ -153,11 +157,6 @@ all split volumes plus the sidecar — once extraction succeeds.
 touched month group is packed into a tar.zst archive. `--split`/`--name` (which
 both imply `--pack`) set the chunk size and the archive's filename, so a whole
 monthly drop becomes one named, chunked backup in a single command.
-
-## Roadmap
-
-- Per-source filters/grouping (Tribes / shared / Kickstarter / store) — the
-  library's `source` field is already captured, just not yet filterable.
 
 ## License
 

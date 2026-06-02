@@ -51,6 +51,9 @@ enum Command {
         /// Filter by object name/tag text (case-insensitive substring).
         #[arg(long)]
         search: Option<String>,
+        /// Filter by source channel, e.g. tribe / purchase / kickstarter.
+        #[arg(long)]
+        source: Option<String>,
         /// Only show items not yet downloaded.
         #[arg(long)]
         undownloaded: bool,
@@ -76,6 +79,9 @@ enum Command {
         /// Batch: every release whose name/tags match this text (asks first).
         #[arg(long)]
         search: Option<String>,
+        /// Batch: every release from this source, e.g. tribe / kickstarter.
+        #[arg(long)]
+        source: Option<String>,
         /// Batch: restrict the above filters to items not yet downloaded.
         #[arg(long)]
         undownloaded: bool,
@@ -168,15 +174,17 @@ async fn main() -> Result<()> {
             month,
             creator,
             search,
+            source,
             undownloaded,
             limit,
-        } => list(month, creator, search, undownloaded, limit).await,
+        } => list(month, creator, search, source, undownloaded, limit).await,
         Command::Download {
             targets,
             keep_archive,
             month,
             creator,
             search,
+            source,
             undownloaded,
             yes,
             jobs,
@@ -192,6 +200,7 @@ async fn main() -> Result<()> {
                     month,
                     creator,
                     search,
+                    source,
                     undownloaded,
                     yes,
                 },
@@ -441,6 +450,7 @@ async fn list(
     month: Option<String>,
     creator: Option<String>,
     search: Option<String>,
+    source: Option<String>,
     undownloaded: bool,
     limit: usize,
 ) -> Result<()> {
@@ -456,15 +466,22 @@ async fn list(
     let mut entries = mmf_core::library::dedupe(raw);
     let manifest = mmf_core::manifest::Manifest::load(&Config::default_data_dir()?)?;
 
-    let any_filter =
-        month.is_some() || creator.is_some() || search.is_some() || undownloaded;
+    let any_filter = month.is_some()
+        || creator.is_some()
+        || search.is_some()
+        || source.is_some()
+        || undownloaded;
 
-    // No filters → show the per-month overview to help the user choose.
+    // No filters → show per-month and per-source overviews to help the user choose.
     if !any_filter {
         let mut by_month: BTreeMap<String, usize> = BTreeMap::new();
+        let mut by_source: BTreeMap<String, usize> = BTreeMap::new();
         for e in &entries {
             *by_month
                 .entry(e.yearmonth().unwrap_or_else(|| "unknown".into()))
+                .or_default() += 1;
+            *by_source
+                .entry(e.source.clone().unwrap_or_else(|| "unknown".into()))
                 .or_default() += 1;
         }
         println!("Library: {} unique objects\n", entries.len());
@@ -477,7 +494,13 @@ async fn list(
             };
             println!("  {label:>9}  {n:>4}");
         }
-        println!("\nShowing newest {limit}. Narrow with --month / --creator / --search / --undownloaded.\n");
+        println!("\nBy source (use --source to filter):");
+        let mut sources: Vec<(&String, &usize)> = by_source.iter().collect();
+        sources.sort_by(|a, b| b.1.cmp(a.1));
+        for (src, n) in sources {
+            println!("  {src:>12}  {n:>4}");
+        }
+        println!("\nShowing newest {limit}. Narrow with --month / --creator / --search / --source / --undownloaded.\n");
     }
 
     // Apply filters.
@@ -486,6 +509,7 @@ async fn list(
         month.as_deref(),
         creator.as_deref(),
         search.as_deref(),
+        source.as_deref(),
         undownloaded,
         &manifest,
     );
@@ -507,7 +531,7 @@ async fn list(
             e.original_id, e.name, creator
         );
     }
-    println!("\nDownload with:  minihoard download <id> [<id> ...]");
+    println!("\nDownload with:  minihoard get <id|name> [...]  (or a filter like --month/--source)");
     Ok(())
 }
 
@@ -518,12 +542,14 @@ fn filter_entries(
     month: Option<&str>,
     creator: Option<&str>,
     search: Option<&str>,
+    source: Option<&str>,
     undownloaded: bool,
     manifest: &mmf_core::manifest::Manifest,
 ) {
     let month_norm = month.map(|m| m.replace('-', ""));
     let creator_lc = creator.map(|c| c.to_lowercase());
     let search_lc = search.map(|s| s.to_lowercase());
+    let source_lc = source.map(|s| s.to_lowercase());
     entries.retain(|e| {
         if let Some(m) = &month_norm {
             if e.yearmonth().as_deref() != Some(m.as_str()) {
@@ -544,6 +570,16 @@ fn filter_entries(
             let in_name = e.name.to_lowercase().contains(s);
             let in_tags = e.tags.iter().any(|t| t.to_lowercase().contains(s));
             if !in_name && !in_tags {
+                return false;
+            }
+        }
+        if let Some(src) = &source_lc {
+            if !e
+                .source
+                .as_deref()
+                .map(|s| s.to_lowercase().contains(src))
+                .unwrap_or(false)
+            {
                 return false;
             }
         }
@@ -652,13 +688,18 @@ struct DownloadFilters {
     month: Option<String>,
     creator: Option<String>,
     search: Option<String>,
+    source: Option<String>,
     undownloaded: bool,
     yes: bool,
 }
 
 impl DownloadFilters {
     fn any(&self) -> bool {
-        self.month.is_some() || self.creator.is_some() || self.search.is_some() || self.undownloaded
+        self.month.is_some()
+            || self.creator.is_some()
+            || self.search.is_some()
+            || self.source.is_some()
+            || self.undownloaded
     }
 }
 
@@ -718,6 +759,7 @@ async fn download(
             filters.month.as_deref(),
             filters.creator.as_deref(),
             filters.search.as_deref(),
+            filters.source.as_deref(),
             filters.undownloaded,
             &manifest,
         );
