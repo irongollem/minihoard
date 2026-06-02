@@ -59,11 +59,22 @@ minihoard sync-cookie  # import your MMF session cookie from your browser
 The session cookie is needed only for **library listing** (downloads use OAuth).
 The easy way is `minihoard sync-cookie`, which reads it straight from a browser
 you're already logged into MyMiniFactory with (like `yt-dlp --cookies-from-browser`)
-— no manual copying. It auto-detects across installed browsers, or pick one with
-`--browser firefox`. On macOS, Chrome's cookie store is Keychain-encrypted, so
-reading it prompts once (Firefox doesn't). If you'd rather paste it yourself,
-`minihoard set-cookie` walks you through copying the header from DevTools. Re-run
-either when the cookie expires (rarely — the `REMEMBERME` cookie is long-lived).
+— no manual copying. It reads the browser's on-disk cookie store; it does **not**
+drive your browser and needs no extension. It auto-detects across installed
+browsers, or pick one with `--browser firefox`. On macOS it prompts once for
+Keychain access to decrypt Chromium cookies (Firefox isn't encrypted, so no
+prompt). Re-run when the cookie expires (rarely — `REMEMBERME` is long-lived).
+
+> **Windows + Chrome/Edge/Brave:** recent Chromium versions (Chrome/Edge 127+)
+> added *app-bound encryption* that ties cookie decryption to the browser
+> itself, which **breaks disk-based readers** like this one. So on a recent
+> Windows machine `sync-cookie --browser edge` (or chrome/brave) will likely
+> fail. Two reliable options there:
+> - **`minihoard sync-cookie --browser firefox`** — Firefox doesn't encrypt
+>   cookies, so it always works. (Log in to MyMiniFactory in Firefox once.)
+> - **`minihoard set-cookie`** — paste the `cookie:` header from your browser's
+>   DevTools (Network tab → any `www.myminifactory.com` request). Works in any
+>   browser.
 
 Secrets are stored in a `0600` file in the app config dir, never a system
 keychain, so headless/automated use never prompts.

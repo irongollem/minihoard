@@ -355,8 +355,18 @@ fn set_cookie() -> Result<()> {
 
 /// Import the session cookie automatically from a logged-in browser.
 async fn sync_cookie(browser: Option<String>) -> Result<()> {
-    let header = mmf_core::cookies::import_from_browser(browser.as_deref())
-        .context("import cookie from browser")?;
+    let header = match mmf_core::cookies::import_from_browser(browser.as_deref()) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("Could not import cookies: {e}\n");
+            eprintln!("Recent Chrome/Edge/Brave (esp. on Windows) encrypt cookies in a way");
+            eprintln!("that blocks disk readers. Two reliable fallbacks:");
+            eprintln!("  • Firefox:  minihoard sync-cookie --browser firefox");
+            eprintln!("    (log in to MyMiniFactory in Firefox first)");
+            eprintln!("  • Paste it: minihoard set-cookie");
+            return Ok(());
+        }
+    };
     mmf_core::auth::TokenStore::save_session_cookie(&header)?;
 
     // Verify it actually works against the library endpoint.
