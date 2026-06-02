@@ -380,29 +380,48 @@ async fn download_objects(ids: Vec<u64>) -> Result<String> {
 
     let count = ids.len();
     tokio::spawn(async move {
+        use mmf_core::pipeline::Progress;
+        use std::collections::HashMap;
+
+        let opts = mmf_core::pipeline::Options {
+            keep_archive: false,
+            concurrency: config.download_concurrency as usize,
+        };
+        let mut inflight: HashMap<String, u64> = HashMap::new();
+        let mut done_count = 0usize;
+
         let result = mmf_core::pipeline::download_objects(
             &config,
             &token,
             cookie.as_deref(),
             &ids,
-            &mmf_core::pipeline::Options::default(),
-            |i, n, name| {
-                update_job(job_id, |j| {
-                    j.total = n;
-                    j.done = i.saturating_sub(1);
+            &opts,
+            |p| match p {
+                Progress::ObjectStart { total, name, .. } => update_job(job_id, |j| {
+                    j.total = total;
                     j.phase = "downloading".into();
-                    j.object = name.to_string();
-                    j.current = format!("downloading {name}");
-                });
-            },
-            |fname, done, total| {
-                update_job(job_id, |j| {
-                    let pct = match total {
-                        Some(t) if t > 0 => format!(" {}%", done * 100 / t),
-                        _ => String::new(),
-                    };
-                    j.current = format!("{} — {fname}{pct}", j.object);
-                });
+                    inflight.insert(name.clone(), 0);
+                    j.current = describe_inflight(&inflight);
+                }),
+                Progress::File { object, done, .. } => {
+                    inflight.insert(object, done);
+                    update_job(job_id, |j| j.current = describe_inflight(&inflight));
+                }
+                Progress::ObjectDone { name, bytes, files } => {
+                    inflight.remove(&name);
+                    done_count += 1;
+                    update_job(job_id, |j| {
+                        j.done = done_count;
+                        j.current = format!(
+                            "finished {name} ({} MB, {files} files); {}",
+                            bytes / 1_048_576,
+                            describe_inflight(&inflight)
+                        );
+                    });
+                }
+                Progress::ObjectFailed { name, .. } => {
+                    inflight.remove(&name);
+                }
             },
         )
         .await;
@@ -481,6 +500,16 @@ fn render_job(id: u64, j: &Job) -> String {
         "Job #{id}: {} — {}/{} done. Current: {}",
         j.phase, j.done, j.total, j.current
     )
+}
+
+/// Summarize the objects currently downloading, for a job's `current` line.
+fn describe_inflight(inflight: &std::collections::HashMap<String, u64>) -> String {
+    if inflight.is_empty() {
+        return "unpacking / finishing…".into();
+    }
+    let mut names: Vec<&str> = inflight.keys().map(|s| s.as_str()).collect();
+    names.sort_unstable();
+    format!("downloading {}: {}", names.len(), names.join(", "))
 }
 
 async fn config_info() -> Result<String> {

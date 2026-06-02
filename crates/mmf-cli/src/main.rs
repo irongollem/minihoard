@@ -82,6 +82,9 @@ enum Command {
         /// Skip the confirmation prompt for batch (filter) downloads.
         #[arg(short = 'y', long)]
         yes: bool,
+        /// How many objects to download in parallel (default: from config, ~5).
+        #[arg(short = 'j', long)]
+        jobs: Option<usize>,
     },
     /// Repack release folder(s) into archives for off-site backup.
     Pack {
@@ -161,10 +164,12 @@ async fn main() -> Result<()> {
             search,
             undownloaded,
             yes,
+            jobs,
         } => {
             download(
                 targets,
                 keep_archive,
+                jobs,
                 DownloadFilters {
                     month,
                     creator,
@@ -258,6 +263,10 @@ fn configure() -> Result<()> {
         redirect_port: existing.as_ref().map(|c| c.redirect_port).unwrap_or(8723),
         download_dir,
         unpack_dir,
+        download_concurrency: existing
+            .as_ref()
+            .map(|c| c.download_concurrency)
+            .unwrap_or(5),
         defaults: existing.map(|c| c.defaults).unwrap_or_default(),
     };
     config.save()?;
@@ -633,7 +642,12 @@ impl DownloadFilters {
     }
 }
 
-async fn download(targets: Vec<String>, keep_archive: bool, filters: DownloadFilters) -> Result<()> {
+async fn download(
+    targets: Vec<String>,
+    keep_archive: bool,
+    jobs: Option<usize>,
+    filters: DownloadFilters,
+) -> Result<()> {
     use indicatif::{ProgressBar, ProgressStyle};
     use std::collections::BTreeSet;
 
@@ -698,49 +712,63 @@ async fn download(targets: Vec<String>, keep_archive: bool, filters: DownloadFil
     if ids.is_empty() {
         anyhow::bail!("nothing matched — try `minihoard list --search <term>` to find ids");
     }
+    let concurrency = jobs.unwrap_or(config.download_concurrency as usize).max(1);
 
+    use mmf_core::pipeline::Progress;
+    use std::collections::HashMap;
+
+    // One aggregate bar across all concurrent downloads: bytes = bytes already
+    // finished + bytes in flight across the parallel objects.
     let pb = ProgressBar::new(0);
     pb.set_style(
-        ProgressStyle::with_template("  {msg} [{bar:30}] {bytes}/{total_bytes} {bytes_per_sec}")
-            .unwrap()
-            .progress_chars("=>-"),
+        ProgressStyle::with_template("  {spinner} {msg} • {bytes} {binary_bytes_per_sec}")
+            .unwrap(),
     );
-    let mut current = String::new();
+    let mut inflight: HashMap<String, u64> = HashMap::new();
+    let mut completed: u64 = 0;
+    let mut done_count = 0usize;
+
     let outcomes = mmf_core::pipeline::download_objects(
         &config,
         &token,
         cookie.as_deref(),
         &ids,
-        &mmf_core::pipeline::Options { keep_archive },
-        |i, n, name| pb.println(format!("→ [{i}/{n}] {name}")),
-        |fname, done, total| {
-            if fname != current {
-                current = fname.to_string();
-                pb.set_message(current.clone());
-                pb.set_position(0);
+        &mmf_core::pipeline::Options {
+            keep_archive,
+            concurrency,
+        },
+        |p| match p {
+            Progress::ObjectStart { index, total, name } => {
+                pb.println(format!("→ [{index}/{total}] {name}"));
             }
-            if let Some(t) = total {
-                pb.set_length(t);
+            Progress::File { object, done, .. } => {
+                inflight.insert(object, done);
+                pb.set_position(completed + inflight.values().sum::<u64>());
             }
-            pb.set_position(done);
+            Progress::ObjectDone { name, bytes, files } => {
+                completed += bytes;
+                inflight.remove(&name);
+                done_count += 1;
+                pb.println(format!("✓ {name} ({} MB, {files} files)", bytes / 1_048_576));
+                pb.set_message(format!("{done_count}/{} done", ids.len()));
+            }
+            Progress::ObjectFailed { name, error } => {
+                inflight.remove(&name);
+                pb.println(format!("⚠ {name}: {error}"));
+            }
         },
     )
     .await?;
     pb.finish_and_clear();
 
-    for o in &outcomes {
-        println!(
-            "✓ {} ({} MB, {} files) → {}",
-            o.name,
-            o.bytes / 1_048_576,
-            o.file_count,
-            o.dir.display()
-        );
-    }
     if outcomes.is_empty() {
         println!("Nothing downloaded (do you own the given ids?).");
     } else {
-        println!("\nClean releases under {}", config.unpack_dir.display());
+        println!(
+            "\nDone: {} release(s) under {}",
+            outcomes.len(),
+            config.unpack_dir.display()
+        );
     }
     Ok(())
 }

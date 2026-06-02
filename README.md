@@ -69,6 +69,7 @@ minihoard list --search dragon --undownloaded
 minihoard get 806054 806051               # by id: download, unpack, clean, reorganize
 minihoard get "dragon knight"             # by name: search, pick, then the same
 minihoard get --month 2026-06             # batch: this month's whole drop (asks first)
+minihoard get --month 2026-06 -j 6        # ...downloading 6 in parallel
 minihoard get --creator "one page rules" --undownloaded   # batch: only what's new
 minihoard get 806054 --keep-archive       # ...but keep the original .zip
 minihoard pack ~/mmf/Creator-06-2026      # repack a folder for backup (tar.zst)
@@ -137,7 +138,9 @@ all split volumes plus the sidecar — once extraction succeeds.
   whole library (id, name, creator, release month, added date).
 - **Download**: object files via the OAuth API; the download host is behind
   Cloudflare, so requests use a Chrome-impersonating client to pass the bot
-  check, with resumable streaming.
+  check, with resumable streaming. Objects download with bounded concurrency
+  (default 5, like a browser's per-host connections; tune with `-j` or the
+  `download_concurrency` config key).
 
 ## Roadmap
 

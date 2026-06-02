@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/mmf-core", "crates/mmf-cli", "crates/mmf-mcp"]
 
 [workspace.package]
-version = "0.2.5"
+version = "0.2.6"
 edition = "2021"
 license = "MIT"
 authors = ["Jeffrey Ernst"]

@@ -27,6 +27,11 @@ pub struct Config {
     /// Where unpacked release folders are written.
     pub unpack_dir: PathBuf,
 
+    /// How many objects to download in parallel. ~5 mirrors a browser's
+    /// per-host connection count; raise it if your connection isn't saturated.
+    #[serde(default = "default_concurrency")]
+    pub download_concurrency: u16,
+
     /// Default behavior toggles for the `sync` command.
     #[serde(default)]
     pub defaults: Defaults,
@@ -58,6 +63,10 @@ fn default_true() -> bool {
 
 fn default_redirect_port() -> u16 {
     8723
+}
+
+fn default_concurrency() -> u16 {
+    5
 }
 
 impl Config {
@@ -143,6 +152,7 @@ impl Config {
              Download dir:   {dl}{dl_e}  (legacy — currently unused; releases go to the unpack dir)\n\n\
              API client id:  {cid}\n\
              OAuth redirect port: {port}\n\
+             Parallel downloads: {conc}\n\
              Defaults: unpack={u}, verify_checksums={v}",
             unpack = self.unpack_dir.display(),
             unpack_e = mark(&self.unpack_dir),
@@ -154,6 +164,7 @@ impl Config {
             dl_e = mark(&self.download_dir),
             cid = self.client_id,
             port = self.redirect_port,
+            conc = self.download_concurrency,
             u = self.defaults.unpack,
             v = self.defaults.verify_checksums,
         )
@@ -186,6 +197,7 @@ mod tests {
             redirect_port: 8723,
             download_dir: PathBuf::from("/tmp/dl"),
             unpack_dir: PathBuf::from("/tmp/unpack"),
+            download_concurrency: 5,
             defaults: Defaults::default(),
         };
         let dir = std::env::temp_dir().join("minihoard-test-config");
