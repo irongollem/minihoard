@@ -490,7 +490,17 @@ impl SplitWriter {
         Ok(())
     }
 
-    fn into_outputs(self) -> Result<(Vec<PathBuf>, u64)> {
+    fn into_outputs(mut self) -> Result<(Vec<PathBuf>, u64)> {
+        // Split was requested but everything fit in one chunk — strip the .001
+        // suffix so the output is a plain `<name>.tar.zst`. The bytes are
+        // identical; the rename just avoids the two-step desktop extraction
+        // that the numbered extension triggers.
+        if self.limit.is_some() && self.outputs.len() == 1 {
+            let plain = self.dir.join(&self.base);
+            std::fs::rename(&self.outputs[0], &plain)
+                .map_err(|e| Error::Unpack(format!("rename single volume: {e}")))?;
+            self.outputs[0] = plain;
+        }
         Ok((self.outputs, self.total))
     }
 }
@@ -866,6 +876,40 @@ mod tests {
         let r = crate::unpack::unpack_zip_into(&report.outputs[0], &dest).unwrap();
         assert_eq!(r.files_written, 2);
         assert!(dest.join("Release-06-2026/a.stl").exists());
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn single_volume_strips_numbered_suffix() {
+        // If --split is given but the compressed output fits in one chunk, the
+        // result should be a plain `<name>.tar.zst`, not `<name>.tar.zst.001`.
+        let tmp = std::env::temp_dir().join("minihoard-pack-single-vol");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let src = tmp.join("Small-06-2026");
+        make_tree(&src); // two tiny .stl files, compresses to well under 1 GB
+        let out = tmp.join("out");
+        let opts = PackOptions {
+            format: PackFormat::TarZst,
+            level: 1,
+            split_bytes: Some(1024 * 1024 * 1024), // 1 GB — will never split on tiny test data
+            write_sidecar: false,
+        };
+        let report = pack_dir(&src, &out, &opts, None, |_| {}).unwrap();
+        assert_eq!(report.outputs.len(), 1);
+        let name = report.outputs[0].file_name().unwrap().to_str().unwrap();
+        assert!(
+            name.ends_with(".tar.zst"),
+            "expected plain .tar.zst, got: {name}"
+        );
+        assert!(
+            !name.ends_with(".001"),
+            "numbered suffix should be stripped for single-volume output: {name}"
+        );
+
+        // Verify the renamed file is a valid archive.
+        let dest = tmp.join("restored");
+        let n = unpack_tar_zst(&report.outputs[0], &dest).unwrap();
+        assert_eq!(n, 2);
         std::fs::remove_dir_all(&tmp).ok();
     }
 
