@@ -174,6 +174,43 @@ fn collect_entries(src: &Path) -> Vec<Entry> {
         .collect()
 }
 
+/// Suggest a human-friendly archive name from a source folder path following
+/// the group convention `{creator}-{MM-YYYY}`. Returns e.g.
+/// `"Dragon Trappers Lodge - 2026-06"` from `dragon-trappers-lodge-06-2026`.
+/// Falls back to `None` when the folder doesn't match the pattern.
+pub fn suggest_archive_name(src: &Path) -> Option<String> {
+    let name = src.file_name()?.to_str()?;
+    if name.len() < 8 {
+        return None;
+    }
+    let tail = &name[name.len() - 7..]; // `MM-YYYY`
+    let tb = tail.as_bytes();
+    let shaped = tb[2] == b'-'
+        && tb[..2].iter().all(|c| c.is_ascii_digit())
+        && tb[3..].iter().all(|c| c.is_ascii_digit());
+    if !shaped || name.as_bytes()[name.len() - 8] != b'-' {
+        return None;
+    }
+    let creator_slug = &name[..name.len() - 8];
+    if creator_slug.is_empty() {
+        return None;
+    }
+    let mm = &tail[..2];
+    let yyyy = &tail[3..];
+    let creator = creator_slug
+        .split(|c| c == '-' || c == '_')
+        .map(|w| {
+            let mut ch = w.chars();
+            match ch.next() {
+                None => String::new(),
+                Some(f) => f.to_uppercase().collect::<String>() + ch.as_str(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some(format!("{creator} - {yyyy}-{mm}"))
+}
+
 /// Parse a `{creator}-{MM-YYYY}` group folder name into `(creator, MM-YYYY)`.
 fn parse_group(parent: &Path) -> (Option<String>, Option<String>) {
     let Some(name) = parent.file_name().and_then(|s| s.to_str()) else {
@@ -197,7 +234,13 @@ fn parse_group(parent: &Path) -> (Option<String>, Option<String>) {
     (None, None)
 }
 
-/// Parse a human size like `2G`, `512M`, `4GB`, `1500000`. Binary units (×1024).
+/// Parse a human size like `2G`, `512M`, `4GB`, `1500000`.
+///
+/// Bare suffixes (`K`/`M`/`G`/`T`) and `KB`/`MB`/`GB`/`TB` use SI decimal
+/// units (×1000) — matching how file-sharing services and storage devices
+/// advertise sizes, so `4G` = 4,000,000,000 bytes and a `--split 4G` archive
+/// is always within a 4 GB upload limit. Use `KiB`/`MiB`/`GiB`/`TiB` for
+/// explicit binary (×1024) units.
 pub fn parse_size(s: &str) -> Result<u64> {
     let t = s.trim();
     let digits_end = t
@@ -208,11 +251,15 @@ pub fn parse_size(s: &str) -> Result<u64> {
         .parse()
         .map_err(|_| Error::Unpack(format!("invalid size `{s}`")))?;
     let mult: f64 = match unit.trim().to_ascii_lowercase().as_str() {
-        "" | "b" => 1.0,
-        "k" | "kb" | "kib" => 1024.0,
-        "m" | "mb" | "mib" => 1024.0 * 1024.0,
-        "g" | "gb" | "gib" => 1024.0 * 1024.0 * 1024.0,
-        "t" | "tb" | "tib" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        "" | "b"          => 1.0,
+        "k"  | "kb"       => 1_000.0,
+        "m"  | "mb"       => 1_000_000.0,
+        "g"  | "gb"       => 1_000_000_000.0,
+        "t"  | "tb"       => 1_000_000_000_000.0,
+        "kib"             => 1024.0,
+        "mib"             => 1024.0 * 1024.0,
+        "gib"             => 1024.0 * 1024.0 * 1024.0,
+        "tib"             => 1024.0 * 1024.0 * 1024.0 * 1024.0,
         other => return Err(Error::Unpack(format!("unknown size unit `{other}` in `{s}`"))),
     };
     let bytes = (num * mult) as u64;
@@ -719,14 +766,85 @@ mod tests {
     }
 
     #[test]
+    fn suggest_archive_name_formats_convention() {
+        let p = Path::new("/mmf/dragon-trappers-lodge-06-2026");
+        assert_eq!(
+            suggest_archive_name(p).as_deref(),
+            Some("Dragon Trappers Lodge - 2026-06")
+        );
+        let p = Path::new("/mmf/one_page_rules-12-2025");
+        assert_eq!(
+            suggest_archive_name(p).as_deref(),
+            Some("One Page Rules - 2025-12")
+        );
+        // Falls back to None for non-matching names.
+        assert!(suggest_archive_name(Path::new("/mmf/some-release")).is_none());
+    }
+
+    #[test]
     fn parse_sizes() {
         assert_eq!(parse_size("1024").unwrap(), 1024);
-        assert_eq!(parse_size("2K").unwrap(), 2048);
-        assert_eq!(parse_size("1M").unwrap(), 1024 * 1024);
-        assert_eq!(parse_size("2G").unwrap(), 2 * 1024 * 1024 * 1024);
-        assert_eq!(parse_size("4gb").unwrap(), 4 * 1024 * 1024 * 1024);
+        // Bare suffixes and *B suffixes are SI decimal.
+        assert_eq!(parse_size("2K").unwrap(), 2_000);
+        assert_eq!(parse_size("1M").unwrap(), 1_000_000);
+        assert_eq!(parse_size("2G").unwrap(), 2_000_000_000);
+        assert_eq!(parse_size("4gb").unwrap(), 4_000_000_000);
+        assert_eq!(parse_size("2G").unwrap(), 2_000_000_000);
+        // *iB suffixes are binary.
+        assert_eq!(parse_size("1KiB").unwrap(), 1024);
+        assert_eq!(parse_size("1MiB").unwrap(), 1024 * 1024);
+        assert_eq!(parse_size("1GiB").unwrap(), 1024 * 1024 * 1024);
         assert!(parse_size("0").is_err());
         assert!(parse_size("bogus").is_err());
+    }
+
+    #[test]
+    fn split_volumes_never_exceed_limit() {
+        // Each produced volume must be <= the requested split size. We test the
+        // mechanism with a small limit (not 4 GB — writing gigabytes in a unit
+        // test is wasteful). The parse_sizes test above already asserts that
+        // parse_size("4G") == 4_000_000_000 and parse_size("2G") == 2_000_000_000,
+        // so together these two tests prove --split 4G keeps every file ≤ 4 GB.
+        let limit: u64 = 500_000; // 500 KB — fast, but big enough to be meaningful
+
+        let tmp = std::env::temp_dir().join("minihoard-pack-ceil");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let src = tmp.join("Big");
+        std::fs::create_dir_all(&src).unwrap();
+
+        // Incompressible data so compressed size ≈ input size.
+        let mut state = 0xDEADBEEF_u64;
+        for i in 0..12u64 {
+            let data: Vec<u8> = (0..100_000)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    (state & 0xff) as u8
+                })
+                .collect();
+            std::fs::write(src.join(format!("f{i}.bin")), data).unwrap();
+        }
+
+        let out = tmp.join("out");
+        let opts = PackOptions {
+            format: PackFormat::TarZst,
+            level: 1,
+            split_bytes: Some(limit),
+            write_sidecar: false,
+        };
+        let report = pack_dir(&src, &out, &opts, None, |_| {}).unwrap();
+
+        assert!(report.outputs.len() >= 2, "expected multiple volumes");
+        for vol in &report.outputs {
+            let size = std::fs::metadata(vol).unwrap().len();
+            assert!(
+                size <= limit,
+                "volume {} is {size} bytes, exceeds limit {limit}",
+                vol.display()
+            );
+        }
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]

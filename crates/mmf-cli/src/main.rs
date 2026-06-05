@@ -1002,20 +1002,35 @@ fn pack(
             None => src.parent().unwrap_or_else(|| std::path::Path::new(".")).to_path_buf(),
         };
 
+        let folder_name = src
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("archive")
+            .to_string();
+
+        // Use --name if given, otherwise prompt so the user can confirm or
+        // override the name before a potentially long compression run.
+        // Suggest the group-convention name (e.g. "Dragon Trappers Lodge - 2026-06")
+        // when the folder matches {creator}-{MM-YYYY}; fall back to the raw folder name.
+        let resolved_name = match &name {
+            Some(n) => n.clone(),
+            None => {
+                let suggestion = mmf_core::pack::suggest_archive_name(src)
+                    .unwrap_or(folder_name.clone());
+                prompt("Archive name", Some(suggestion))?
+            }
+        };
+
         let pb = ProgressBar::new(0);
         pb.set_style(
             ProgressStyle::with_template("  {msg} [{bar:30}] {bytes}/{total_bytes}")
                 .unwrap()
                 .progress_chars("=>-"),
         );
-        let label = src
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("archive")
-            .to_string();
+        let label = resolved_name.clone();
         pb.set_message(label.clone());
 
-        let report = pack_dir(src, &out_dir, &opts, name.as_deref(), |done| {
+        let report = pack_dir(src, &out_dir, &opts, Some(&resolved_name), |done| {
             pb.set_position(done);
         })
         .with_context(|| format!("pack {}", src.display()))?;

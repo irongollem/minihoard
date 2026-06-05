@@ -177,7 +177,7 @@ fn tool_defs() -> Value {
                     "paths": { "type": "array", "items": { "type": "string" }, "description": "Folders to pack (each becomes its own archive)" },
                     "format": { "type": "string", "enum": ["tarzst", "zip"], "description": "Archive format (default tarzst)" },
                     "level": { "type": "integer", "description": "zstd level 1-22 (default 19; tar.zst only)" },
-                    "split": { "type": "string", "description": "Volume size for chunked backup, e.g. 4G or 2G (tar.zst only)" },
+                    "split": { "type": "string", "description": "Volume size for chunked backup (tar.zst only). Uses SI decimal units: '4G' = 4,000,000,000 bytes (fits Telegram 4 GB limit), '2G' = 2,000,000,000 bytes (fits Telegram 2 GB non-premium limit). Accepts K/M/G/T (decimal) or KiB/MiB/GiB/TiB (binary). Raw byte counts also accepted, e.g. '3800000000'. Do NOT use GiB/MiB if targeting upload limits — those are larger than their GB/MB equivalents." },
                     "out": { "type": "string", "description": "Output directory (default: alongside each source folder)" },
                     "name": { "type": "string", "description": "Archive base filename, verbatim (e.g. 'Dungeon Classics - 2026-04'). Single folder only; defaults to the folder name." }
                 },
