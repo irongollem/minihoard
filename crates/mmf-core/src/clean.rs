@@ -71,12 +71,24 @@ pub fn strip_apple_artifacts(root: &Path) -> usize {
     removed
 }
 
-/// Collapse redundant single-folder nesting left by archives that contain one
-/// top-level folder (giving `Release/Release/files`). If `dir` holds nothing but
-/// a single subdirectory — macOS artifacts ignored — that wrapper is pointless:
-/// the inner folder's contents are moved up, the empty inner folder is removed,
-/// and `dir` is renamed to the inner folder's [`clean_name`]. Repeats for
-/// multiple nested levels (`A/B/C/files` → `c/files`).
+/// Normalize a folder name for redundant-wrapper comparison: lowercase and keep
+/// only alphanumerics, so separators, spaces, and punctuation are ignored
+/// (`Foo Bar`, `foo_bar`, `FOO-BAR` all share a key).
+fn norm_key(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// Collapse a redundant *doubled* folder left by archives that wrap their
+/// contents in a folder of the same name (giving `Release/Release/files`). Only
+/// a lone subdirectory whose name matches the parent's — case-insensitively,
+/// ignoring separators and punctuation — is treated as redundant: its contents
+/// are moved up, the empty wrapper removed, and `dir` renamed to the inner
+/// folder's [`clean_name`]. A differently-named single child (e.g.
+/// `Foo/Supported`) is real structure and is left untouched. Repeats while the
+/// same-name doubling continues.
 ///
 /// Returns the directory's final path (it may have been renamed). If the target
 /// name already exists as a sibling, the contents are still collapsed but the
@@ -95,6 +107,17 @@ pub fn flatten_single_dir(dir: &Path) -> std::io::Result<PathBuf> {
         let child = kids.pop().unwrap();
         if !child.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             break; // single entry, but it's a file — nothing to collapse
+        }
+        // Only collapse a TRUE redundant wrapper: the lone child must have the
+        // same name as its parent (case-insensitive, ignoring separators and
+        // punctuation), e.g. `Foo/Foo`. A differently-named single child —
+        // `Foo/Supported`, `Foo/Bar` — is real structure and is left untouched.
+        let parent_name = current
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if norm_key(&child.file_name().to_string_lossy()) != norm_key(&parent_name) {
+            break;
         }
         let child_path = child.path();
 
@@ -230,29 +253,29 @@ mod tests {
     }
 
     #[test]
-    fn flattens_single_wrapper_and_adopts_inner_name() {
+    fn flattens_exact_name_doubling() {
         let base = tmp("minihoard-flat-1");
-        let dir = base.join("behir_presupported");
+        let dir = base.join("behir");
         std::fs::create_dir_all(dir.join("Behir/Supported")).unwrap();
         std::fs::write(dir.join("Behir/thumb.jpg"), b"x").unwrap();
         std::fs::write(dir.join("Behir/Supported/a.stl"), b"x").unwrap();
         std::fs::write(dir.join(".DS_Store"), b"junk").unwrap(); // ignored
 
         let out = flatten_single_dir(&dir).unwrap();
-        assert_eq!(out, base.join("behir")); // renamed to inner (cleaned)
+        // `behir/Behir` is a same-name double (case-insensitive) → collapse.
+        assert_eq!(out, base.join("behir"));
         assert!(out.join("Supported/a.stl").exists());
         assert!(out.join("thumb.jpg").exists());
-        assert!(!base.join("behir_presupported").exists());
         std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
-    fn collapses_wrapper_but_keeps_supported_unsupported_siblings() {
-        // The real MMF case: a single wrapper around a folder that itself has
-        // multiple sensible children. Collapse the wrapper, but NEVER merge or
-        // descend into Supported/Unsupported — they stay distinct siblings.
+    fn collapses_doubling_but_keeps_supported_unsupported_siblings() {
+        // A same-name double around a folder that itself has multiple children:
+        // collapse the doubling, but never merge or descend into the variant
+        // folders — they stay distinct siblings under the model.
         let base = tmp("minihoard-flat-siblings");
-        let dir = base.join("behir_presupported_dungeon_classics");
+        let dir = base.join("behir");
         std::fs::create_dir_all(dir.join("Behir/Supported")).unwrap();
         std::fs::create_dir_all(dir.join("Behir/Unsupported")).unwrap();
         std::fs::write(dir.join("Behir/Supported/s.stl"), b"x").unwrap();
@@ -260,8 +283,7 @@ mod tests {
         std::fs::write(dir.join("Behir/thumb.jpg"), b"x").unwrap();
 
         let out = flatten_single_dir(&dir).unwrap();
-        assert_eq!(out, base.join("behir")); // wrapper removed, inner name adopted
-        // Both folders survive, side by side, contents intact and unmerged.
+        assert_eq!(out, base.join("behir"));
         assert!(out.join("Supported/s.stl").exists());
         assert!(out.join("Unsupported/u.stl").exists());
         assert!(out.join("thumb.jpg").exists());
@@ -285,29 +307,37 @@ mod tests {
     }
 
     #[test]
-    fn flattens_multiple_nested_levels() {
+    fn does_not_collapse_differently_named_or_variant_child() {
         let base = tmp("minihoard-flat-3");
+        // A differently-named single wrapper is real structure → left as-is.
         let dir = base.join("rel");
-        std::fs::create_dir_all(dir.join("A/B")).unwrap();
-        std::fs::write(dir.join("A/B/model.stl"), b"x").unwrap();
-
+        std::fs::create_dir_all(dir.join("Inner")).unwrap();
+        std::fs::write(dir.join("Inner/model.stl"), b"x").unwrap();
         let out = flatten_single_dir(&dir).unwrap();
-        assert_eq!(out, base.join("b"));
-        assert!(out.join("model.stl").exists());
+        assert_eq!(out, dir); // "rel" != "Inner"
+        assert!(out.join("Inner/model.stl").exists());
+
+        // A model that ships only `Supported/` keeps its own name.
+        let m = base.join("mummies");
+        std::fs::create_dir_all(m.join("Supported")).unwrap();
+        std::fs::write(m.join("Supported/s.stl"), b"x").unwrap();
+        let out2 = flatten_single_dir(&m).unwrap();
+        assert_eq!(out2, m); // not renamed to "supported"
+        assert!(out2.join("Supported/s.stl").exists());
+
         std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
-    fn keeps_name_on_collision_but_still_collapses() {
+    fn collapses_repeated_same_name_doubling() {
         let base = tmp("minihoard-flat-4");
-        std::fs::create_dir_all(base.join("inner")).unwrap(); // occupies target name
-        let dir = base.join("wrapper");
-        std::fs::create_dir_all(dir.join("Inner")).unwrap();
-        std::fs::write(dir.join("Inner/a.stl"), b"x").unwrap();
+        let dir = base.join("foo");
+        std::fs::create_dir_all(dir.join("Foo/foo")).unwrap();
+        std::fs::write(dir.join("Foo/foo/model.stl"), b"x").unwrap();
 
         let out = flatten_single_dir(&dir).unwrap();
-        assert_eq!(out, dir); // not renamed (would collide with base/inner)
-        assert!(dir.join("a.stl").exists()); // but still collapsed
+        assert_eq!(out, base.join("foo"));
+        assert!(out.join("model.stl").exists());
         std::fs::remove_dir_all(&base).ok();
     }
 

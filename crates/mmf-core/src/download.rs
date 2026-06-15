@@ -41,7 +41,7 @@ pub async fn download_to(
     }
 
     // Resume support: if a partial file exists, ask the server to continue.
-    let existing = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+    let mut existing = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
 
     let client = wreq::Client::builder()
         .emulation(Emulation::Chrome137)
@@ -55,7 +55,41 @@ pub async fn download_to(
     }
 
     let mut resp = req.send().await.map_err(|e| dl_err("request", e))?;
-    let status = resp.status();
+    let mut status = resp.status();
+
+    // A ranged resume can come back 416 (Range Not Satisfiable) when the local
+    // partial is already at — or beyond — the object's size: the file finished
+    // on an earlier run. If it's exactly complete we're done; if it's somehow
+    // larger than the source it's corrupt, so discard it and re-fetch fresh.
+    // Without this, an interrupted multi-file download could never be retried —
+    // the already-complete files would 416 forever.
+    if existing > 0 && status.as_u16() == 416 {
+        let total = resp
+            .headers()
+            .get("content-range")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.rsplit('/').next())
+            .and_then(|n| n.trim().parse::<u64>().ok());
+        if total == Some(existing) {
+            on_progress(existing, total);
+            return Ok(DownloadReport {
+                url: url.to_string(),
+                dest: dest.to_path_buf(),
+                bytes: existing,
+                resumed: true,
+            });
+        }
+        let _ = std::fs::remove_file(dest);
+        existing = 0;
+        resp = client
+            .get(url)
+            .bearer_auth(bearer_token)
+            .send()
+            .await
+            .map_err(|e| dl_err("request", e))?;
+        status = resp.status();
+    }
+
     if !status.is_success() {
         let location = resp
             .headers()

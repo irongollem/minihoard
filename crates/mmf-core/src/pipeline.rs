@@ -264,9 +264,22 @@ async fn process_object(
 
         if crate::unpack::is_archive(&dest) {
             let dest2 = dest.clone();
-            let target2 = target.clone();
+            // Unpack each sub-zip into its OWN folder (`foo.zip` -> `foo/`) so
+            // models stay separate. Extracting straight into the release folder
+            // would dump a zip's bare `Supported/`/`Unsupported/` at the top and
+            // merge them across models. Redundant `foo/foo` nesting is then
+            // collapsed, but a lone `Supported/` is preserved.
+            let stem = std::path::Path::new(&filename)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(crate::clean::clean_name)
+                .unwrap_or_else(|| "release".to_string());
+            let subdir = target.join(stem);
             let r = tokio::task::spawn_blocking(move || {
-                crate::unpack::unpack_zip_into(&dest2, &target2)
+                let report = crate::unpack::unpack_zip_into(&dest2, &subdir)?;
+                crate::clean::strip_apple_artifacts(&subdir);
+                let _ = crate::clean::flatten_single_dir(&subdir);
+                Ok::<_, Error>(report)
             })
             .await
             .map_err(|e| Error::Unpack(format!("unpack task: {e}")))??;
