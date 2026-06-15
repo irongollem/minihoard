@@ -1218,57 +1218,123 @@ fn setup_mcp() -> Result<()> {
         );
     }
 
-    let config_path = claude_desktop_config_path()?;
+    // A single machine can have more than one Claude Desktop install: the
+    // classic %APPDATA% install and the MSIX/Store-packaged one (which is also
+    // what the claude.ai Windows download installs). Each reads its own config,
+    // so register in every location we find.
+    let config_paths = claude_desktop_config_paths()?;
+    let command = mcp_bin.display().to_string();
 
-    let mut config: serde_json::Value = if config_path.exists() {
-        let s = std::fs::read_to_string(&config_path)
-            .with_context(|| format!("read {}", config_path.display()))?;
-        serde_json::from_str(&s).unwrap_or_else(|_| serde_json::json!({}))
-    } else {
-        serde_json::json!({})
-    };
+    for config_path in &config_paths {
+        let mut config: serde_json::Value = if config_path.exists() {
+            let s = std::fs::read_to_string(config_path)
+                .with_context(|| format!("read {}", config_path.display()))?;
+            serde_json::from_str(&s).unwrap_or_else(|_| serde_json::json!({}))
+        } else {
+            serde_json::json!({})
+        };
 
-    if config.get("mcpServers").is_none() {
-        config["mcpServers"] = serde_json::json!({});
+        if config.get("mcpServers").is_none() {
+            config["mcpServers"] = serde_json::json!({});
+        }
+        config["mcpServers"]["minihoard"] = serde_json::json!({ "command": command });
+
+        if let Some(parent) = config_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(config_path, serde_json::to_string_pretty(&config)?)?;
+
+        println!("Registered minihoard-mcp in Claude Desktop.");
+        println!("Config: {}", config_path.display());
     }
-    config["mcpServers"]["minihoard"] = serde_json::json!({
-        "command": mcp_bin.display().to_string()
-    });
 
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
-
-    println!("Registered minihoard-mcp in Claude Desktop.");
-    println!("Config: {}", config_path.display());
     println!("\nRestart Claude Desktop to apply.");
     Ok(())
 }
 
-fn claude_desktop_config_path() -> Result<PathBuf> {
+/// All Claude Desktop config paths we should register in.
+///
+/// macOS and Linux have a single well-known location. Windows can have two: the
+/// classic per-user install at %APPDATA%\Claude, and the MSIX/Store-packaged
+/// install (also used by the claude.ai Windows download), whose data is
+/// sandboxed under
+/// %LOCALAPPDATA%\Packages\Claude_<publisher>\LocalCache\Roaming\Claude.
+/// We write to every location that exists so registration works regardless of
+/// which build is installed.
+fn claude_desktop_config_paths() -> Result<Vec<PathBuf>> {
     #[cfg(target_os = "macos")]
     {
         let dirs = directories::UserDirs::new()
             .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
-        Ok(dirs
+        Ok(vec![dirs
             .home_dir()
-            .join("Library/Application Support/Claude/claude_desktop_config.json"))
+            .join("Library/Application Support/Claude/claude_desktop_config.json")])
     }
     #[cfg(target_os = "windows")]
     {
-        let appdata =
-            std::env::var("APPDATA").context("APPDATA environment variable not set")?;
-        Ok(PathBuf::from(appdata).join("Claude/claude_desktop_config.json"))
+        let mut dirs = windows_claude_config_dirs();
+        // If nothing is installed yet (or detection failed), fall back to the
+        // classic location so we still write a usable config.
+        if dirs.is_empty() {
+            let appdata =
+                std::env::var("APPDATA").context("APPDATA environment variable not set")?;
+            dirs.push(PathBuf::from(appdata).join("Claude"));
+        }
+        Ok(dirs
+            .into_iter()
+            .map(|d| d.join("claude_desktop_config.json"))
+            .collect())
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let dirs = directories::UserDirs::new()
             .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
-        Ok(dirs
+        Ok(vec![dirs
             .home_dir()
-            .join(".config/Claude/claude_desktop_config.json"))
+            .join(".config/Claude/claude_desktop_config.json")])
     }
+}
+
+/// Existing Claude Desktop config directories on Windows.
+///
+/// Returns the classic %APPDATA%\Claude directory plus any MSIX/Store-packaged
+/// containers under %LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude
+/// — but only those that actually exist, so we don't create stray configs for
+/// an install that isn't present. The package publisher suffix isn't guaranteed
+/// stable, so we match any `Claude_*` package family.
+#[cfg(target_os = "windows")]
+fn windows_claude_config_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+
+    // Classic (non-Store) install.
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let p = PathBuf::from(appdata).join("Claude");
+        if p.is_dir() {
+            dirs.push(p);
+        }
+    }
+
+    // MSIX / Microsoft Store install (also the claude.ai Windows download).
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        let packages = PathBuf::from(local).join("Packages");
+        if let Ok(entries) = std::fs::read_dir(&packages) {
+            for entry in entries.flatten() {
+                if !entry.file_name().to_string_lossy().starts_with("Claude_") {
+                    continue;
+                }
+                let p = entry
+                    .path()
+                    .join("LocalCache")
+                    .join("Roaming")
+                    .join("Claude");
+                if p.is_dir() {
+                    dirs.push(p);
+                }
+            }
+        }
+    }
+
+    dirs
 }
 
 fn prompt(label: &str, default: Option<String>) -> Result<String> {
