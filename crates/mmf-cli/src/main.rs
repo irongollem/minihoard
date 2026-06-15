@@ -1179,9 +1179,7 @@ async fn upgrade() -> Result<()> {
         let bytes = client.get(&url).send().await?.bytes().await?;
         let dest = bin_dir.join(format!("{bin}{ext}"));
 
-        // Write to a sibling temp file, then rename over the target (atomic on Unix;
-        // on Windows, renaming over a running exe succeeds because the OS keeps the
-        // original file handle open until the process exits).
+        // Write the new binary to a sibling temp file first.
         let tmp = bin_dir.join(format!(".{bin}.tmp{ext}"));
         std::fs::write(&tmp, &bytes)?;
 
@@ -1189,6 +1187,23 @@ async fn upgrade() -> Result<()> {
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+        }
+
+        // On Unix we can rename straight over the target, even when it's the
+        // running binary. Windows won't let you delete or overwrite a file
+        // that's in use — and during `upgrade` the running process *is*
+        // minihoard.exe — so a direct replace fails with "Access is denied"
+        // (os error 5). Windows does allow *renaming* a running/locked exe,
+        // so move the existing binary aside first, then drop the new one into
+        // place. The leftover ".old" file is cleaned up on the next run.
+        #[cfg(windows)]
+        {
+            let old = bin_dir.join(format!(".{bin}.old{ext}"));
+            let _ = std::fs::remove_file(&old); // best-effort: clear prior leftover
+            if dest.exists() {
+                std::fs::rename(&dest, &old)
+                    .with_context(|| format!("move aside {}", dest.display()))?;
+            }
         }
 
         std::fs::rename(&tmp, &dest)
