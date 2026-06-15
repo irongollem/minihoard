@@ -17,12 +17,56 @@ pub struct UnpackReport {
 /// Returns a report including any nested archives found in the output, which
 /// callers may choose to unpack in turn. Guards against zip-slip path escapes.
 pub fn unpack_zip(archive: &Path, dest_root: &Path) -> Result<UnpackReport> {
-    let stem = archive
+    // A split set is `name.zip.001`, `name.zip.002`, … `resolve_volumes` returns
+    // just `[archive]` for a plain single `.zip`.
+    let volumes = crate::pack::resolve_volumes(archive)?;
+
+    // Strip a `.NNN` split suffix to get the logical archive name, then its stem.
+    let fname = archive
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| Error::Unpack(format!("bad archive name: {}", archive.display())))?;
+    let logical = strip_split_suffix(fname);
+    let stem = Path::new(logical)
         .file_stem()
         .and_then(|s| s.to_str())
         .ok_or_else(|| Error::Unpack(format!("bad archive name: {}", archive.display())))?;
     let dest = dest_root.join(stem);
-    unpack_zip_into(archive, &dest)
+
+    if volumes.len() == 1 {
+        return unpack_zip_into(&volumes[0], &dest);
+    }
+
+    // The zip reader needs a single seekable file, so concatenate the volumes
+    // into a temp `.zip` first, then extract that.
+    let tmp = std::env::temp_dir().join(format!(
+        "minihoard-zipjoin-{}-{stem}.zip",
+        std::process::id()
+    ));
+    {
+        let mut reader = crate::pack::MultiFileReader::open(volumes)?;
+        let mut out = std::fs::File::create(&tmp)?;
+        std::io::copy(&mut reader, &mut out)?;
+    }
+    let result = unpack_zip_into(&tmp, &dest);
+    let _ = std::fs::remove_file(&tmp);
+    let mut report = result?;
+    report.source = archive.to_path_buf();
+    Ok(report)
+}
+
+/// Strip a trailing `.NNN` split-volume suffix (`name.zip.001` → `name.zip`);
+/// returns the name unchanged when it isn't a split volume.
+fn strip_split_suffix(name: &str) -> &str {
+    let is_split = name
+        .rsplit('.')
+        .next()
+        .is_some_and(|s| s.len() == 3 && s.bytes().all(|b| b.is_ascii_digit()));
+    if is_split {
+        &name[..name.rfind('.').unwrap()]
+    } else {
+        name
+    }
 }
 
 /// Extract a `.zip` directly into `dest` (no stem subfolder). Multiple archives

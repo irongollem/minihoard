@@ -8,7 +8,8 @@
 //!   7-Zip.
 //! - [`PackFormat::Zip`] — Deflate `.zip`. Broadly supported, native
 //!   double-click extraction, and random-access (a catalog can read one entry
-//!   without unpacking everything). Single file only — no splitting.
+//!   without unpacking everything). Also supports `--split` into fixed-size
+//!   volumes (a plain byte-split of the finished `.zip`, rejoined to restore).
 
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -24,7 +25,8 @@ use crate::error::{Error, Result};
 pub enum PackFormat {
     /// `tar` + `zstd` (`.tar.zst`). Best compression; supports `--split`.
     TarZst,
-    /// Deflate `.zip`. Broadly supported, random-access; single file only.
+    /// Deflate `.zip`. Broadly supported, random-access; splittable via a
+    /// plain byte-split of the finished archive.
     Zip,
 }
 
@@ -55,7 +57,8 @@ pub struct PackOptions {
     /// zstd compression level (1–22). Ignored for zip. ~19 is a good archival
     /// default; higher is slower for marginal gains on mesh data.
     pub level: i32,
-    /// Roll output into volumes of this many bytes each (tar.zst only).
+    /// Roll output into volumes of this many bytes each. tar.zst splits the
+    /// compressed stream; zip is byte-split after the archive is built.
     pub split_bytes: Option<u64>,
     /// Write a `<archive>.json` sidecar listing the contents (default: yes).
     /// Lets a catalog see what's inside — especially for tar.zst, which has no
@@ -313,15 +316,7 @@ pub fn pack_dir(
 
     let (outputs, output_bytes) = match opts.format {
         PackFormat::TarZst => pack_tar_zst(src, out_dir, name, opts, on_progress)?,
-        PackFormat::Zip => {
-            if opts.split_bytes.is_some() {
-                return Err(Error::Unpack(
-                    "splitting is only supported for tar.zst (zip needs a seekable, single file)"
-                        .to_string(),
-                ));
-            }
-            pack_zip(src, out_dir, name, on_progress)?
-        }
+        PackFormat::Zip => pack_zip(src, out_dir, name, opts.split_bytes, on_progress)?,
     };
 
     let sidecar = if opts.write_sidecar {
@@ -441,10 +436,21 @@ fn pack_zip(
     src: &Path,
     out_dir: &Path,
     name: &str,
+    split_bytes: Option<u64>,
     mut on_progress: impl FnMut(u64),
 ) -> Result<(Vec<PathBuf>, u64)> {
-    let out_path = out_dir.join(format!("{name}.{}", PackFormat::Zip.ext()));
-    let file = File::create(&out_path)?;
+    // The zip writer needs a seekable output, so we can't stream directly into
+    // split volumes. Build the whole `.zip` first (straight to the final path
+    // when not splitting, or to a temp file when we are), then byte-split that
+    // finished archive into `<name>.zip.001`, `.002`, … Restoring just
+    // concatenates the volumes back together.
+    let final_path = out_dir.join(format!("{name}.{}", PackFormat::Zip.ext()));
+    let build_path = match split_bytes {
+        Some(_) => out_dir.join(format!(".{name}.{}.partial", PackFormat::Zip.ext())),
+        None => final_path.clone(),
+    };
+
+    let file = File::create(&build_path)?;
     let mut zip = zip::ZipWriter::new(file);
     let options: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
@@ -481,8 +487,27 @@ fn pack_zip(
     zip.finish()
         .map_err(|e| Error::Unpack(format!("zip finish: {e}")))?;
 
-    let output_bytes = std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
-    Ok((vec![out_path], output_bytes))
+    match split_bytes {
+        None => {
+            let output_bytes = std::fs::metadata(&final_path).map(|m| m.len()).unwrap_or(0);
+            Ok((vec![final_path], output_bytes))
+        }
+        Some(limit) => {
+            // Byte-split the finished archive into fixed-size volumes, reusing
+            // the same SplitWriter that tar.zst uses (`<name>.zip.001`, …).
+            let base = format!("{name}.{}", PackFormat::Zip.ext());
+            let mut writer = SplitWriter::new(out_dir.to_path_buf(), base, Some(limit));
+            let mut f = File::open(&build_path)?;
+            io::copy(&mut f, &mut writer)
+                .map_err(|e| Error::Unpack(format!("split zip: {e}")))?;
+            writer
+                .flush()
+                .map_err(|e| Error::Unpack(format!("split zip flush: {e}")))?;
+            drop(f);
+            let _ = std::fs::remove_file(&build_path);
+            writer.into_outputs()
+        }
+    }
 }
 
 /// Best-effort core count for zstd's worker threads (1 if undetectable).
@@ -627,11 +652,10 @@ fn sidecar_path_for(archive: &Path) -> PathBuf {
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or_default();
-    let logical = if name.contains(".tar.zst.")
-        && name
-            .rsplit('.')
-            .next()
-            .is_some_and(|s| s.len() == 3 && s.chars().all(|c| c.is_ascii_digit()))
+    let logical = if name
+        .rsplit('.')
+        .next()
+        .is_some_and(|s| s.len() == 3 && s.chars().all(|c| c.is_ascii_digit()))
     {
         &name[..name.rfind('.').unwrap()]
     } else {
@@ -673,7 +697,7 @@ pub fn unpack_tar_zst(archive: &Path, dest: &Path) -> Result<usize> {
 /// Given any volume path, return the ordered list of volumes to read. For a
 /// single `.tar.zst` that's just `[archive]`; for `name.tar.zst.001` it's all
 /// `name.tar.zst.NNN` siblings sorted ascending.
-fn resolve_volumes(archive: &Path) -> Result<Vec<PathBuf>> {
+pub(crate) fn resolve_volumes(archive: &Path) -> Result<Vec<PathBuf>> {
     let name = archive
         .file_name()
         .and_then(|s| s.to_str())
@@ -682,7 +706,7 @@ fn resolve_volumes(archive: &Path) -> Result<Vec<PathBuf>> {
     // Detect the `.NNN` split suffix.
     let is_split_volume = name.rsplit('.').next().is_some_and(|s| {
         s.len() == 3 && s.chars().all(|c| c.is_ascii_digit())
-    }) && name.contains(".tar.zst.");
+    }) && (name.contains(".tar.zst.") || name.contains(".zip."));
     if !is_split_volume {
         return Ok(vec![archive.to_path_buf()]);
     }
@@ -715,13 +739,13 @@ fn resolve_volumes(archive: &Path) -> Result<Vec<PathBuf>> {
 }
 
 /// Reads a sequence of files as one continuous byte stream.
-struct MultiFileReader {
+pub(crate) struct MultiFileReader {
     files: std::vec::IntoIter<PathBuf>,
     current: Option<File>,
 }
 
 impl MultiFileReader {
-    fn open(paths: Vec<PathBuf>) -> Result<Self> {
+    pub(crate) fn open(paths: Vec<PathBuf>) -> Result<Self> {
         let mut iter = paths.into_iter();
         let current = match iter.next() {
             Some(p) => Some(File::open(p)?),
