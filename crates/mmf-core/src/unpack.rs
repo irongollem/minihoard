@@ -69,6 +69,39 @@ fn strip_split_suffix(name: &str) -> &str {
     }
 }
 
+/// Make a relative archive path safe for the host filesystem: trailing spaces
+/// and dots are stripped from each component (Windows silently mangles or
+/// rejects them, otherwise aborting extraction), and characters Windows forbids
+/// in names (`:*?"<>|` and control chars) are replaced with `_`. Names are
+/// otherwise preserved (case, inner spaces). Only `Normal` components survive,
+/// so the zip-slip guard from `enclosed_name` stays intact.
+fn sanitize_rel_path(rel: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in rel.components() {
+        if let std::path::Component::Normal(os) = comp {
+            let cleaned: String = os
+                .to_string_lossy()
+                .chars()
+                .map(|c| match c {
+                    ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+                    c if (c as u32) < 0x20 => '_',
+                    c => c,
+                })
+                .collect();
+            let trimmed = cleaned.trim_end_matches(|c| c == ' ' || c == '.');
+            let name = if trimmed.is_empty() {
+                cleaned.as_str()
+            } else {
+                trimmed
+            };
+            if !name.is_empty() {
+                out.push(name);
+            }
+        }
+    }
+    out
+}
+
 /// Extract a `.zip` directly into `dest` (no stem subfolder). Multiple archives
 /// can be extracted into the same `dest` to merge them.
 pub fn unpack_zip_into(archive: &Path, dest: &Path) -> Result<UnpackReport> {
@@ -93,17 +126,25 @@ pub fn unpack_zip_into(archive: &Path, dest: &Path) -> Result<UnpackReport> {
                 entry.name()
             )));
         };
-        let out_path = dest.join(rel);
+        // Sanitize each path component for the host filesystem: archives packed
+        // on macOS/Linux can carry trailing spaces/dots (e.g. `Unsupported `) or
+        // reserved characters that Windows rejects, which otherwise aborts
+        // extraction with a "path not found" error.
+        let out_path = dest.join(sanitize_rel_path(&rel));
 
         if entry.is_dir() {
-            std::fs::create_dir_all(&out_path)?;
+            std::fs::create_dir_all(&out_path)
+                .map_err(|e| Error::Unpack(format!("create dir {}: {e}", out_path.display())))?;
             continue;
         }
         if let Some(parent) = out_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| Error::Unpack(format!("create dir {}: {e}", parent.display())))?;
         }
-        let mut out = std::fs::File::create(&out_path)?;
-        std::io::copy(&mut entry, &mut out)?;
+        let mut out = std::fs::File::create(&out_path)
+            .map_err(|e| Error::Unpack(format!("create {}: {e}", out_path.display())))?;
+        std::io::copy(&mut entry, &mut out)
+            .map_err(|e| Error::Unpack(format!("write {}: {e}", out_path.display())))?;
         files_written += 1;
 
         if is_archive(&out_path) {
@@ -141,6 +182,24 @@ mod tests {
             zip.write_all(data).unwrap();
         }
         zip.finish().unwrap();
+    }
+
+    #[test]
+    fn sanitizes_trailing_space_and_dots() {
+        // macOS-packed `Unsupported ` (trailing space) is illegal on Windows.
+        assert_eq!(
+            sanitize_rel_path(Path::new("Unsupported /a.stl")),
+            PathBuf::from("Unsupported/a.stl")
+        );
+        assert_eq!(
+            sanitize_rel_path(Path::new("foo./bar...")),
+            PathBuf::from("foo/bar")
+        );
+        // Inner spaces and case are preserved.
+        assert_eq!(
+            sanitize_rel_path(Path::new("My Model/Part 01.stl")),
+            PathBuf::from("My Model/Part 01.stl")
+        );
     }
 
     #[test]
