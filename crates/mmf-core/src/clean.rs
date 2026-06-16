@@ -5,25 +5,25 @@ use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
 
-/// Normalize a name for use as a path component: trim, lowercase, and replace
-/// spaces and path separators with underscores. Mirrors stl-pack's convention.
+/// Normalize a name for use as a path component: trim, lowercase, and collapse
+/// path separators and runs of whitespace into single spaces.
 pub fn clean_name(s: &str) -> String {
     let s = s.trim().to_lowercase();
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         match ch {
-            ' ' | '\t' | '/' | '\\' => out.push('_'),
+            ' ' | '\t' | '/' | '\\' => out.push(' '),
             // Drop characters that are awkward in filenames across platforms.
             ':' | '*' | '?' | '"' | '<' | '>' | '|' => {}
             c => out.push(c),
         }
     }
-    // Collapse repeated underscores and trim them off the ends.
+    // Collapse runs of whitespace and trim them off the ends.
     let collapsed = out
-        .split('_')
+        .split(' ')
         .filter(|p| !p.is_empty())
         .collect::<Vec<_>>()
-        .join("_");
+        .join(" ");
     if collapsed.is_empty() {
         "untitled".into()
     } else {
@@ -221,9 +221,9 @@ mod tests {
 
     #[test]
     fn cleans_names() {
-        assert_eq!(clean_name("  Parasite Collectibles "), "parasite_collectibles");
-        assert_eq!(clean_name("Belkey, The Knellmaster - 3 SCALES"), "belkey,_the_knellmaster_-_3_scales");
-        assert_eq!(clean_name("a / b : c"), "a_b_c");
+        assert_eq!(clean_name("  Parasite Collectibles "), "parasite collectibles");
+        assert_eq!(clean_name("Belkey, The Knellmaster - 3 SCALES"), "belkey, the knellmaster - 3 scales");
+        assert_eq!(clean_name("a / b : c"), "a b c");
         assert_eq!(clean_name(""), "untitled");
     }
 
