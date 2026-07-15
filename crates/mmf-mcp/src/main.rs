@@ -415,7 +415,7 @@ async fn download_objects(ids: Vec<u64>) -> Result<String> {
                     inflight.insert(object, done);
                     update_job(job_id, |j| j.current = describe_inflight(&inflight));
                 }
-                Progress::ObjectDone { name, bytes, files } => {
+                Progress::ObjectDone { name, bytes, files, .. } => {
                     inflight.remove(&name);
                     done_count += 1;
                     update_job(job_id, |j| {

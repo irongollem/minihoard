@@ -50,25 +50,30 @@ pub struct Outcome {
 pub enum Progress {
     /// An object started downloading. `index` is 1-based over `total` objects.
     ObjectStart {
+        id: u64,
         index: usize,
         total: usize,
         name: String,
     },
     /// Byte progress for the file currently downloading within `object`.
     File {
+        id: u64,
         object: String,
         filename: String,
         done: u64,
         total: Option<u64>,
     },
-    /// An object finished: downloaded + unpacked + cleaned.
+    /// An object finished: downloaded + unpacked + cleaned. `dir` is the final
+    /// (possibly flattened/renamed) release folder on disk.
     ObjectDone {
+        id: u64,
         name: String,
+        dir: PathBuf,
         bytes: u64,
         files: usize,
     },
     /// An object could not be completed (e.g. not owned, or an error).
-    ObjectFailed { name: String, error: String },
+    ObjectFailed { id: u64, name: String, error: String },
 }
 
 fn now_unix() -> u64 {
@@ -210,6 +215,7 @@ async fn process_object(
         .or_else(|| object["name"].as_str().map(String::from))
         .unwrap_or_else(|| format!("object-{id}"));
     let _ = ptx.send(Progress::ObjectStart {
+        id,
         index,
         total,
         name: name.clone(),
@@ -228,6 +234,7 @@ async fn process_object(
         .unwrap_or_default();
     if files.is_empty() {
         let _ = ptx.send(Progress::ObjectFailed {
+            id,
             name,
             error: "no downloadable files (do you own it?)".into(),
         });
@@ -252,6 +259,7 @@ async fn process_object(
             let fname = filename.clone();
             crate::download::download_to(url, &dest, &shared.token, move |done, total| {
                 let _ = ptx.send(Progress::File {
+                    id,
                     object: object_name.clone(),
                     filename: fname.clone(),
                     done,
@@ -311,7 +319,9 @@ async fn process_object(
     }
 
     let _ = ptx.send(Progress::ObjectDone {
+        id,
         name: name.clone(),
+        dir: final_dir.clone(),
         bytes: total_bytes,
         files: file_count,
     });

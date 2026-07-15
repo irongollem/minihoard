@@ -16,10 +16,23 @@ const REPO: &str = "irongollem/minihoard";
 struct Cli {
     #[command(subcommand)]
     command: Command,
+
+    /// Emit machine-readable NDJSON (one JSON object per line) instead of human
+    /// text. Meaningful for `status`, `list`, and `get`/`download`; other
+    /// commands still print for people. This is the contract Plinth consumes —
+    /// see docs. On error, a single `{"event":"error","kind":…}` line is printed
+    /// and the process exits non-zero.
+    #[arg(long, global = true)]
+    json: bool,
 }
 
 #[derive(Subcommand)]
 enum Command {
+    /// Report install + auth health without mutating anything (version, whether
+    /// OAuth works, the logged-in username, whether a session cookie is stored,
+    /// and where the library lives). Cookie *validity* is only provable by a
+    /// real `list`; this reports presence, not freshness.
+    Status,
     /// Create or update the config file (interactive first-run wizard).
     Configure,
     /// Show the current config and where files are stored (downloads, etc.).
@@ -170,7 +183,31 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    match cli.command {
+    let json = cli.json;
+    let result = dispatch(cli.command, json).await;
+
+    // In JSON mode the human-readable anyhow Debug print would corrupt the
+    // stream, so intercept errors and emit a single typed `error` line instead.
+    // `dispatch` never returns Err in JSON mode after this point (we exit here),
+    // so the outer `?`-free return keeps a clean exit code for humans too.
+    if json {
+        if let Err(e) = &result {
+            emit(serde_json::json!({
+                "event": "error",
+                "kind": error_kind(e),
+                "message": e.to_string(),
+            }));
+            std::process::exit(1);
+        }
+    }
+    result
+}
+
+/// Route a parsed command to its handler. `json` selects NDJSON output for the
+/// commands Plinth drives (`status`/`list`/`get`); the rest ignore it.
+async fn dispatch(command: Command, json: bool) -> Result<()> {
+    match command {
+        Command::Status => status(json).await,
         Command::Configure => configure(),
         Command::Config => show_config(),
         Command::Login => login().await,
@@ -186,7 +223,7 @@ async fn main() -> Result<()> {
             source,
             undownloaded,
             limit,
-        } => list(month, creator, search, source, undownloaded, limit).await,
+        } => list(month, creator, search, source, undownloaded, limit, json).await,
         Command::Download {
             targets,
             keep_archive,
@@ -214,6 +251,7 @@ async fn main() -> Result<()> {
                     yes,
                 },
                 PackAfter { pack, split, name },
+                json,
             )
             .await
         }
@@ -235,6 +273,108 @@ async fn main() -> Result<()> {
         Command::Upgrade => upgrade().await,
         Command::SetupMcp => setup_mcp(),
     }
+}
+
+/// Print one NDJSON object on its own stdout line — the unit of the `--json`
+/// protocol. Serialization can't realistically fail for the values we build.
+fn emit(value: serde_json::Value) {
+    if let Ok(line) = serde_json::to_string(&value) {
+        println!("{line}");
+    }
+}
+
+/// Build the `entry` payload for one library object. Pure so a test can pin the
+/// exact shape Plinth's `list` parser reads.
+fn entry_json(e: &mmf_core::library::LibraryEntry, downloaded: bool) -> serde_json::Value {
+    serde_json::json!({
+        "event": "entry",
+        "id": e.original_id,
+        "name": e.name,
+        "creator": e.creator_name,
+        "creator_username": e.creator_username,
+        "source": e.source,
+        "library_added_at": e.library_added_at,
+        "yearmonth": e.yearmonth(),
+        "tags": e.tags,
+        "downloaded": downloaded,
+    })
+}
+
+/// Classify an error into the stable `kind` string Plinth branches on. We match
+/// on the typed [`mmf_core::Error`] anywhere in the anyhow chain, so `.context()`
+/// wrapping doesn't hide the cause. New kinds are additive; Plinth treats any
+/// unknown kind as a generic failure.
+fn error_kind(e: &anyhow::Error) -> &'static str {
+    use mmf_core::Error;
+    match e.downcast_ref::<Error>() {
+        Some(Error::SessionMissing) => "cookie_missing",
+        Some(Error::SessionExpired(_)) => "cookie_expired",
+        Some(Error::NotAuthenticated | Error::Auth(_)) => "auth",
+        Some(Error::ConfigMissing(_) | Error::Config(_)) => "config",
+        _ => "error",
+    }
+}
+
+/// Report install + auth health without changing anything. Never fails on a
+/// missing config or dead credentials — those are *states* it reports, not
+/// errors. OAuth health is proved by refreshing a token and reading `/user`;
+/// cookie *presence* is checked, but validity is left to a real `list`.
+async fn status(json: bool) -> Result<()> {
+    let version = env!("CARGO_PKG_VERSION");
+    let config = Config::load().ok();
+    let library_dir = config.as_ref().map(|c| c.unpack_dir.display().to_string());
+    let cookie_present = mmf_core::auth::TokenStore::session_cookie()
+        .ok()
+        .flatten()
+        .is_some();
+
+    // Prove OAuth by refreshing and hitting /user. A failure here is expected
+    // when the user hasn't logged in yet — it's a false `oauth_ok`, not an error.
+    let (oauth_ok, username) = match &config {
+        Some(c) => match mmf_core::auth::access_token(&c.client_id).await {
+            Ok(token) => {
+                let client = mmf_core::api::Client::with_bearer(token);
+                match client.current_user().await {
+                    Ok(u) => (true, u["username"].as_str().map(String::from)),
+                    // Token refreshed but /user failed (transient) — still "ok".
+                    Err(_) => (true, None),
+                }
+            }
+            Err(_) => (false, None),
+        },
+        None => (false, None),
+    };
+
+    if json {
+        emit(serde_json::json!({
+            "event": "status",
+            "version": version,
+            "oauth_ok": oauth_ok,
+            "username": username,
+            "cookie_present": cookie_present,
+            "library_dir": library_dir,
+        }));
+    } else {
+        println!("minihoard {version}");
+        match &username {
+            Some(u) => println!("  OAuth:   ok (logged in as {u})"),
+            None if oauth_ok => println!("  OAuth:   ok"),
+            None => println!("  OAuth:   not logged in (run `minihoard login`)"),
+        }
+        println!(
+            "  Cookie:  {}",
+            if cookie_present {
+                "present (run `list` to confirm it's still valid)"
+            } else {
+                "none (run `minihoard sync-cookie` for library listing)"
+            }
+        );
+        match &library_dir {
+            Some(d) => println!("  Library: {d}"),
+            None => println!("  Library: (no config — run `minihoard configure`)"),
+        }
+    }
+    Ok(())
 }
 
 /// Interactive first-run wizard. Writes a non-secret config file; secrets are
@@ -487,6 +627,7 @@ fn preview(v: &serde_json::Value) -> String {
     serde_json::to_string_pretty(&clone).unwrap_or_else(|_| v.to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn list(
     month: Option<String>,
     creator: Option<String>,
@@ -494,18 +635,39 @@ async fn list(
     source: Option<String>,
     undownloaded: bool,
     limit: usize,
+    json: bool,
 ) -> Result<()> {
     use std::collections::BTreeMap;
 
     let _config = Config::load()?;
     let cookie = mmf_core::auth::TokenStore::session_cookie()?
-        .ok_or_else(|| anyhow::anyhow!("no session cookie — run `minihoard set-cookie` first"))?;
+        .ok_or(mmf_core::Error::SessionMissing)?;
 
     let raw = mmf_core::library::fetch_library(&cookie)
         .await
         .context("fetch library (objectPreviews)")?;
     let mut entries = mmf_core::library::dedupe(raw);
     let manifest = mmf_core::manifest::Manifest::load(&Config::default_data_dir()?)?;
+
+    // JSON mode is for programmatic consumers (Plinth): stream every matching
+    // entry — no overview, no `--limit` cap, no trailing hints — then a summary.
+    if json {
+        filter_entries(
+            &mut entries,
+            month.as_deref(),
+            creator.as_deref(),
+            search.as_deref(),
+            source.as_deref(),
+            undownloaded,
+            &manifest,
+        );
+        entries.sort_by(|a, b| b.library_added_at.cmp(&a.library_added_at));
+        for e in &entries {
+            emit(entry_json(e, manifest.contains(e.original_id)));
+        }
+        emit(serde_json::json!({ "event": "summary", "total": entries.len() }));
+        return Ok(());
+    }
 
     let any_filter = month.is_some()
         || creator.is_some()
@@ -763,6 +925,7 @@ async fn download(
     jobs: Option<usize>,
     filters: DownloadFilters,
     pack_after: PackAfter,
+    json: bool,
 ) -> Result<()> {
     use indicatif::{ProgressBar, ProgressStyle};
     use std::collections::BTreeSet;
@@ -786,9 +949,7 @@ async fn download(
 
     // Batch: resolve a whole filter set, preview it, and confirm before pulling.
     if filters.any() {
-        let cookie = cookie.as_deref().ok_or_else(|| {
-            anyhow::anyhow!("batch filters need your library — run `minihoard set-cookie` first")
-        })?;
+        let cookie = cookie.as_deref().ok_or(mmf_core::Error::SessionMissing)?;
         let mut entries = mmf_core::library::dedupe(
             mmf_core::library::fetch_library(cookie)
                 .await
@@ -809,18 +970,22 @@ async fn download(
         if entries.is_empty() {
             anyhow::bail!("no items match that filter");
         }
-        println!("{} item(s) match this batch:", entries.len());
-        for e in entries.iter().take(40) {
-            let creator = e.creator_name.as_deref().unwrap_or("?");
-            let mlabel = e.month_label().unwrap_or_default();
-            println!("  {:>8}  [{mlabel:>7}]  {} — {}", e.original_id, e.name, creator);
-        }
-        if entries.len() > 40 {
-            println!("  … and {} more", entries.len() - 40);
-        }
-        if !filters.yes && !confirm(&format!("Download all {}?", entries.len()))? {
-            println!("Cancelled.");
-            return Ok(());
+        // JSON callers get no interactive preview/confirm — the machine picked
+        // the set already. Humans see it and confirm (unless `-y`).
+        if !json {
+            println!("{} item(s) match this batch:", entries.len());
+            for e in entries.iter().take(40) {
+                let creator = e.creator_name.as_deref().unwrap_or("?");
+                let mlabel = e.month_label().unwrap_or_default();
+                println!("  {:>8}  [{mlabel:>7}]  {} — {}", e.original_id, e.name, creator);
+            }
+            if entries.len() > 40 {
+                println!("  … and {} more", entries.len() - 40);
+            }
+            if !filters.yes && !confirm(&format!("Download all {}?", entries.len()))? {
+                println!("Cancelled.");
+                return Ok(());
+            }
         }
         id_set.extend(entries.iter().map(|e| e.original_id));
     }
@@ -830,6 +995,12 @@ async fn download(
         anyhow::bail!("nothing matched — try `minihoard list --search <term>` to find ids");
     }
     let concurrency = jobs.unwrap_or(config.download_concurrency as usize).max(1);
+
+    // JSON mode streams typed events instead of drawing a progress bar.
+    if json {
+        return download_json(&config, &token, cookie.as_deref(), &ids, keep_archive, concurrency)
+            .await;
+    }
 
     use mmf_core::pipeline::Progress;
     use std::collections::HashMap;
@@ -855,21 +1026,21 @@ async fn download(
             concurrency,
         },
         |p| match p {
-            Progress::ObjectStart { index, total, name } => {
+            Progress::ObjectStart { index, total, name, .. } => {
                 pb.println(format!("→ [{index}/{total}] {name}"));
             }
             Progress::File { object, done, .. } => {
                 inflight.insert(object, done);
                 pb.set_position(completed + inflight.values().sum::<u64>());
             }
-            Progress::ObjectDone { name, bytes, files } => {
+            Progress::ObjectDone { name, bytes, files, .. } => {
                 completed += bytes;
                 inflight.remove(&name);
                 done_count += 1;
                 pb.println(format!("✓ {name} ({} MB, {files} files)", bytes / 1_048_576));
                 pb.set_message(format!("{done_count}/{} done", ids.len()));
             }
-            Progress::ObjectFailed { name, error } => {
+            Progress::ObjectFailed { name, error, .. } => {
                 inflight.remove(&name);
                 pb.println(format!("⚠ {name}: {error}"));
             }
@@ -891,6 +1062,69 @@ async fn download(
     if pack_after.enabled() {
         repack_groups(&config, &outcomes, &pack_after)?;
     }
+    Ok(())
+}
+
+/// The `get --json` path: download the given ids and stream one NDJSON line per
+/// [`Progress`] event, closing with a `job_done` summary. No progress bar, no
+/// human prose — the shapes here are the contract Plinth's download queue reads.
+async fn download_json(
+    config: &Config,
+    token: &str,
+    cookie: Option<&str>,
+    ids: &[u64],
+    keep_archive: bool,
+    concurrency: usize,
+) -> Result<()> {
+    use mmf_core::pipeline::Progress;
+    use std::cell::Cell;
+
+    // Event-observed tallies: `ok` counts object_done, `failed` counts
+    // object_failed. Objects that hard-error mid-pipeline emit neither, so
+    // ok+failed can be < total — Plinth reconciles leftovers when the process
+    // exits. `Cell` because the callback is `FnMut` and we read the counts after.
+    let ok = Cell::new(0usize);
+    let failed = Cell::new(0usize);
+
+    let outcomes = mmf_core::pipeline::download_objects(
+        config,
+        token,
+        cookie,
+        ids,
+        &mmf_core::pipeline::Options {
+            keep_archive,
+            concurrency,
+        },
+        |p| match p {
+            Progress::ObjectStart { id, index, total, name } => emit(serde_json::json!({
+                "event": "object_start", "id": id, "name": name,
+                "index": index, "total": total,
+            })),
+            Progress::File { id, done, total, .. } => emit(serde_json::json!({
+                "event": "file_progress", "id": id,
+                "bytes_done": done, "bytes_total": total,
+            })),
+            Progress::ObjectDone { id, dir, .. } => {
+                ok.set(ok.get() + 1);
+                emit(serde_json::json!({
+                    "event": "object_done", "id": id,
+                    "dir": dir.display().to_string(),
+                }));
+            }
+            Progress::ObjectFailed { id, error, .. } => {
+                failed.set(failed.get() + 1);
+                emit(serde_json::json!({
+                    "event": "object_failed", "id": id, "reason": error,
+                }));
+            }
+        },
+    )
+    .await?;
+    let _ = outcomes; // per-object outcomes were already streamed as events
+
+    emit(serde_json::json!({
+        "event": "job_done", "ok": ok.get(), "failed": failed.get(),
+    }));
     Ok(())
 }
 
@@ -1409,4 +1643,83 @@ fn shellexpand_tilde(s: &str) -> String {
         }
     }
     s.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mmf_core::library::LibraryEntry;
+
+    fn sample_entry() -> LibraryEntry {
+        LibraryEntry {
+            original_id: 806054,
+            name: "Behir".into(),
+            source: Some("TRIBE".into()),
+            release: Some("type:tribes-tier;owner:1;tribe:2;tier:3;yearmonth:202606".into()),
+            creator_name: Some("Dungeon Classics".into()),
+            creator_username: Some("dclassics".into()),
+            library_added_at: Some("2026-06-01T12:00:00+00:00".into()),
+            tags: vec!["dragon".into(), "beast".into()],
+        }
+    }
+
+    /// The `entry` payload is a contract with Plinth's list parser: field names
+    /// and derived values (yearmonth from `release`) must stay exactly this.
+    #[test]
+    fn entry_json_shape_is_pinned() {
+        let v = entry_json(&sample_entry(), true);
+        assert_eq!(v["event"], "entry");
+        assert_eq!(v["id"], 806054);
+        assert_eq!(v["name"], "Behir");
+        assert_eq!(v["creator"], "Dungeon Classics");
+        assert_eq!(v["creator_username"], "dclassics");
+        assert_eq!(v["source"], "TRIBE");
+        assert_eq!(v["library_added_at"], "2026-06-01T12:00:00+00:00");
+        assert_eq!(v["yearmonth"], "202606"); // derived from `release`
+        assert_eq!(v["tags"], serde_json::json!(["dragon", "beast"]));
+        assert_eq!(v["downloaded"], true);
+    }
+
+    /// Absent optionals must serialize as JSON null (never be dropped), so the
+    /// consumer always sees the same key set.
+    #[test]
+    fn entry_json_keeps_null_fields() {
+        let mut e = sample_entry();
+        e.creator_username = None;
+        e.release = None; // no yearmonth derivable
+        let v = entry_json(&e, false);
+        assert!(v["creator_username"].is_null());
+        assert!(v["yearmonth"].is_null());
+        assert_eq!(v["downloaded"], false);
+    }
+
+    /// Plinth branches on `kind`, so this mapping is the real contract — the
+    /// human message wording is free to change, these strings are not.
+    #[test]
+    fn error_kinds_are_stable_across_context_wrapping() {
+        let cases: &[(mmf_core::Error, &str)] = &[
+            (mmf_core::Error::SessionMissing, "cookie_missing"),
+            (mmf_core::Error::SessionExpired("stale".into()), "cookie_expired"),
+            (mmf_core::Error::NotAuthenticated, "auth"),
+            (mmf_core::Error::Auth("nope".into()), "auth"),
+            (mmf_core::Error::Config("bad".into()), "config"),
+        ];
+        for (err, kind) in cases {
+            // clone the variant by re-matching (Error isn't Clone); rebuild it.
+            let rebuilt: mmf_core::Error = match err {
+                mmf_core::Error::SessionMissing => mmf_core::Error::SessionMissing,
+                mmf_core::Error::SessionExpired(s) => mmf_core::Error::SessionExpired(s.clone()),
+                mmf_core::Error::NotAuthenticated => mmf_core::Error::NotAuthenticated,
+                mmf_core::Error::Auth(s) => mmf_core::Error::Auth(s.clone()),
+                mmf_core::Error::Config(s) => mmf_core::Error::Config(s.clone()),
+                _ => unreachable!(),
+            };
+            // Wrap in context to prove downcast still finds the cause.
+            let wrapped = anyhow::Error::from(rebuilt).context("while doing a thing");
+            assert_eq!(error_kind(&wrapped), *kind);
+        }
+
+        let generic = anyhow::anyhow!("something else entirely");
+        assert_eq!(error_kind(&generic), "error");
+    }
 }

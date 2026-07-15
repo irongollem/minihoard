@@ -103,10 +103,26 @@ minihoard tidy ~/mmf/some-release         # ...or specific folders
 minihoard unpack FILE.zip                 # restore a .zip or .tar.zst archive
 minihoard unpack FILE.tar.zst.001         # ...or a split archive (first volume)
 minihoard unpack FILE.tar.zst --delete-archive  # ...and remove it once extracted
+minihoard status                          # install + auth health at a glance
 minihoard where                           # show config + where files are stored
 minihoard whoami                          # show the logged-in account
 minihoard upgrade                         # update to the latest release
 ```
+
+`status` is the quick "is everything wired up?" check: version, whether OAuth
+works (and who you're logged in as), whether a session cookie is stored, and
+where your library lives — without changing anything.
+
+### Machine-readable output (`--json`)
+
+`status`, `list`, and `get` accept a global `--json` flag that switches their
+output to NDJSON (one JSON object per line) instead of human text: `status`
+emits a `status` object, `list` streams one `entry` per object then a `summary`,
+and `get` streams `object_start` / `file_progress` / `object_done` /
+`object_failed` and closes with `job_done`. Errors become a single
+`{"event":"error","kind":…}` line with a non-zero exit. This is the contract the
+[stl-pack](https://github.com/irongollem/stl-pack) desktop app consumes to drive
+minihoard as a library UI; day-to-day terminal use doesn't need it.
 
 `get` (alias of `download`) is the one-shot command: give it object ids or a
 name to search for, and it produces ready-to-use releases — each object is
