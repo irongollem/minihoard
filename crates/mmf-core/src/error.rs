@@ -21,6 +21,19 @@ pub enum Error {
     #[error("authentication failed: {0}")]
     Auth(String),
 
+    /// No website session cookie is stored at all. Distinct from
+    /// [`Error::SessionExpired`] so a machine reader (the JSON mode, and
+    /// through it Plinth) can tell "never set one up" from "the one you had
+    /// went stale" — both point at `set-cookie`/`sync-cookie`, but the
+    /// wording a human sees differs.
+    #[error("no session cookie stored — run `minihoard sync-cookie` (or `set-cookie`) first")]
+    SessionMissing,
+
+    /// A stored session cookie no longer authenticates (the library endpoint
+    /// served its logged-out HTML page instead of JSON).
+    #[error("session cookie expired or invalid: {0}")]
+    SessionExpired(String),
+
     #[error("MyMiniFactory API error ({status}): {message}")]
     Api { status: u16, message: String },
 

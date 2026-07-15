@@ -31,6 +31,10 @@ pub struct LibraryEntry {
     pub release: Option<String>,
     #[serde(rename = "creatorName", default)]
     pub creator_name: Option<String>,
+    /// The creator's handle (stable, unlike the display name) — surfaced so a
+    /// consumer can link back to the creator without guessing.
+    #[serde(rename = "creatorUsername", default)]
+    pub creator_username: Option<String>,
     /// When it was added to the library (ISO-8601) — used for incremental sync.
     #[serde(rename = "libraryAddedAt", default)]
     pub library_added_at: Option<String>,
@@ -96,10 +100,10 @@ pub async fn fetch_library(cookie: &str) -> Result<Vec<LibraryEntry>> {
 
     // Not logged in / expired cookie => the site serves an HTML page instead.
     if body.trim_start().starts_with('<') || !(200..300).contains(&status) {
-        return Err(Error::Auth(
-            "library listing returned a web page, not data — your session cookie is \
-             missing or expired. Re-run `minihoard set-cookie` with a fresh Cookie \
-             header from a logged-in browser."
+        return Err(Error::SessionExpired(
+            "library listing returned a web page, not data — re-run \
+             `minihoard sync-cookie` (or `set-cookie`) with a fresh Cookie header \
+             from a logged-in browser."
                 .into(),
         ));
     }
