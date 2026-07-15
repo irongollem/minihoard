@@ -82,6 +82,13 @@ enum Command {
         #[arg(long, default_value_t = 60)]
         limit: usize,
     },
+    /// Show one object's detail (name, official page url, preview image) —
+    /// used by Plinth to expand a library row on demand. `--json` emits an
+    /// `object` event; human output prints the name + url.
+    Object {
+        /// The object id (e.g. 806054).
+        id: u64,
+    },
     /// Get one or more releases by id or name (downloads, unpacks, cleans,
     /// reorganizes — leaves clean releases on disk).
     #[command(visible_alias = "get")]
@@ -224,6 +231,7 @@ async fn dispatch(command: Command, json: bool) -> Result<()> {
             undownloaded,
             limit,
         } => list(month, creator, search, source, undownloaded, limit, json).await,
+        Command::Object { id } => object(id, json).await,
         Command::Download {
             targets,
             keep_archive,
@@ -372,6 +380,59 @@ async fn status(json: bool) -> Result<()> {
         match &library_dir {
             Some(d) => println!("  Library: {d}"),
             None => println!("  Library: (no config — run `minihoard configure`)"),
+        }
+    }
+    Ok(())
+}
+
+/// Fetch one object's detail via the OAuth API and surface just what a library
+/// UI needs to expand a row: the official page url and a preview image. Kept
+/// deliberately lean — this is a per-row, on-demand call, not a bulk sweep.
+async fn object(id: u64, json: bool) -> Result<()> {
+    let config = Config::load()?;
+    let token = mmf_core::auth::access_token(&config.client_id)
+        .await
+        .context("get access token (run `minihoard login` first)")?;
+    let client = mmf_core::api::Client::with_bearer(token);
+    let obj = client
+        .get(&format!("/objects/{id}"))
+        .await
+        .with_context(|| format!("GET /objects/{id}"))?;
+
+    let name = obj["name"].as_str().unwrap_or_default().to_string();
+    let url = obj["url"].as_str().map(String::from);
+
+    // The primary image (fall back to the first) gives the preview; pick a
+    // small size for the thumbnail and a mid size for a larger view.
+    let images = obj["images"].as_array().cloned().unwrap_or_default();
+    let primary = images
+        .iter()
+        .find(|i| i["is_primary"].as_bool() == Some(true))
+        .or_else(|| images.first());
+    let size = |img: &serde_json::Value, key: &str| img[key]["url"].as_str().map(String::from);
+    let thumbnail_url = primary.and_then(|i| size(i, "thumbnail"));
+    let image_url = primary.and_then(|i| {
+        size(i, "standard")
+            .or_else(|| size(i, "large"))
+            .or_else(|| size(i, "original"))
+    });
+
+    if json {
+        emit(serde_json::json!({
+            "event": "object",
+            "id": id,
+            "name": name,
+            "url": url,
+            "thumbnail_url": thumbnail_url,
+            "image_url": image_url,
+        }));
+    } else {
+        println!("{name}  (#{id})");
+        if let Some(u) = &url {
+            println!("  {u}");
+        }
+        if let Some(t) = &thumbnail_url {
+            println!("  preview: {t}");
         }
     }
     Ok(())
