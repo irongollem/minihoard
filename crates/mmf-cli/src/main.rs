@@ -302,6 +302,8 @@ fn entry_json(e: &mmf_core::library::LibraryEntry, downloaded: bool) -> serde_js
         "creator_username": e.creator_username,
         "source": e.source,
         "library_added_at": e.library_added_at,
+        "published_at": e.published_at,
+        "created_at": e.created_at,
         "yearmonth": e.yearmonth(),
         "tags": e.tags,
         "downloaded": downloaded,
@@ -1720,6 +1722,8 @@ mod tests {
             creator_name: Some("Dungeon Classics".into()),
             creator_username: Some("dclassics".into()),
             library_added_at: Some("2026-06-01T12:00:00+00:00".into()),
+            published_at: Some("2026-05-20T08:00:00+00:00".into()),
+            created_at: Some("2026-05-18T08:00:00+00:00".into()),
             tags: vec!["dragon".into(), "beast".into()],
         }
     }
@@ -1736,6 +1740,8 @@ mod tests {
         assert_eq!(v["creator_username"], "dclassics");
         assert_eq!(v["source"], "TRIBE");
         assert_eq!(v["library_added_at"], "2026-06-01T12:00:00+00:00");
+        assert_eq!(v["published_at"], "2026-05-20T08:00:00+00:00");
+        assert_eq!(v["created_at"], "2026-05-18T08:00:00+00:00");
         assert_eq!(v["yearmonth"], "202606"); // derived from `release`
         assert_eq!(v["tags"], serde_json::json!(["dragon", "beast"]));
         assert_eq!(v["downloaded"], true);

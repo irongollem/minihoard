@@ -38,6 +38,15 @@ pub struct LibraryEntry {
     /// When it was added to the library (ISO-8601) — used for incremental sync.
     #[serde(rename = "libraryAddedAt", default)]
     pub library_added_at: Option<String>,
+    /// When the object was published (ISO-8601). Present for ~84% of the
+    /// library; the natural "publication date" fallback when there's no tribe
+    /// release month.
+    #[serde(rename = "publishedAt", default)]
+    pub published_at: Option<String>,
+    /// When the object was created on MMF (ISO-8601). Always present — the
+    /// last-resort date when neither a release month nor a publish date exists.
+    #[serde(rename = "createdAt", default)]
+    pub created_at: Option<String>,
     #[serde(default, deserialize_with = "null_default")]
     pub tags: Vec<String>,
 }
