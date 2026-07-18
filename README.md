@@ -121,7 +121,7 @@ emits a `status` object, `list` streams one `entry` per object then a `summary`,
 and `get` streams `object_start` / `file_progress` / `object_done` /
 `object_failed` and closes with `job_done`. Errors become a single
 `{"event":"error","kind":…}` line with a non-zero exit. This is the contract the
-[stl-pack](https://github.com/irongollem/stl-pack) desktop app consumes to drive
+[plinth](https://github.com/irongollem/plinth) desktop app consumes to drive
 minihoard as a library UI; day-to-day terminal use doesn't need it.
 
 `get` (alias of `download`) is the one-shot command: give it object ids or a
