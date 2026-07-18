@@ -3,7 +3,7 @@
 A Rust CLI **and** MCP server to fetch your [MyMiniFactory](https://www.myminifactory.com/)
 library, unpack and reorganize it into tidy per-creator/month folders, and
 repack it (tar.zst or zip, splittable) for archival and cataloging alongside
-[stl-pack](https://github.com/irongollem/stl-pack).
+[plinth](https://github.com/irongollem/plinth).
 
 Browse and download from the terminal, or talk to an assistant (via the MCP
 server) — "show me June's Tribe releases", "download these".
